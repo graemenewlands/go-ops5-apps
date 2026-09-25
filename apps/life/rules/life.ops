@@ -1,0 +1,156 @@
+;; ==============================================================================
+;; Conway's Game of Life in OPS5 Production Rules
+;;
+;; Stage-based forward-chaining pattern matching over cellular automaton states.
+;; Toroidal boundary wrapping is evaluated via modulo arithmetic.
+;; ==============================================================================
+
+(literalize step phase generation)
+(literalize grid width height)
+(literalize cell r c alive)
+(literalize delta dr dc)
+(literalize vote r c)
+(literalize tally r c count)
+(literalize next-cell r c alive)
+
+;; ------------------------------------------------------------------------------
+;; Stage 1: EMIT VOTES
+;; For every live cell, emit a neighbor vote to each of its 8 Moore neighbors.
+;; Uses toroidal wrapping: (r + dr + height) % height.
+;; ------------------------------------------------------------------------------
+(p emit-vote [salience 10]
+    (step ^phase emit)
+    (grid ^width <w> ^height <h>)
+    (cell ^r <r> ^c <c> ^alive 1)
+    (delta ^dr <dr> ^dc <dc>)
+  -->
+    (bind <nr> (compute <r> + <dr> + <h> % <h>))
+    (bind <nc> (compute <c> + <dc> + <w> % <w>))
+    (make vote ^r <nr> ^c <nc>)
+)
+
+;; When all live cells have emitted votes for all deltas, advance to tally phase.
+(p transition-emit-to-tally [salience 1]
+    <st> (step ^phase emit)
+  -->
+    (modify <st> ^phase tally)
+)
+
+;; ------------------------------------------------------------------------------
+;; Stage 2: TALLY VOTES (Consumption Accumulator Pattern)
+;; Consumes each vote WME, creating or incrementing a tally per coordinate.
+;; ------------------------------------------------------------------------------
+(p init-tally [salience 20]
+    (step ^phase tally)
+    <v> (vote ^r <r> ^c <c>)
+    -(tally ^r <r> ^c <c>)
+  -->
+    (make tally ^r <r> ^c <c> ^count 1)
+    (remove <v>)
+)
+
+(p inc-tally [salience 20]
+    (step ^phase tally)
+    <t> (tally ^r <r> ^c <c> ^count <cnt>)
+    <v> (vote ^r <r> ^c <c>)
+  -->
+    (bind <next> (compute <cnt> + 1))
+    (modify <t> ^count <next>)
+    (remove <v>)
+)
+
+;; When all votes are consumed, transition to evaluation phase.
+(p transition-tally-to-eval [salience 1]
+    <st> (step ^phase tally)
+    -(vote)
+  -->
+    (modify <st> ^phase evaluate)
+)
+
+;; ------------------------------------------------------------------------------
+;; Stage 3: EVALUATE CONWAY RULES
+;; Birth: A dead cell with exactly 3 live neighbors becomes a live cell.
+;; Survival: A live cell with 2 or 3 live neighbors survives.
+;; All other tallies are discarded (underpopulation / overpopulation).
+;; ------------------------------------------------------------------------------
+(p birth [salience 30]
+    (step ^phase evaluate)
+    <t> (tally ^r <r> ^c <c> ^count 3)
+    -(cell ^r <r> ^c <c> ^alive 1)
+  -->
+    (make next-cell ^r <r> ^c <c> ^alive 1)
+    (remove <t>)
+)
+
+(p survival-2 [salience 30]
+    (step ^phase evaluate)
+    <t> (tally ^r <r> ^c <c> ^count 2)
+    (cell ^r <r> ^c <c> ^alive 1)
+  -->
+    (make next-cell ^r <r> ^c <c> ^alive 1)
+    (remove <t>)
+)
+
+(p survival-3 [salience 30]
+    (step ^phase evaluate)
+    <t> (tally ^r <r> ^c <c> ^count 3)
+    (cell ^r <r> ^c <c> ^alive 1)
+  -->
+    (make next-cell ^r <r> ^c <c> ^alive 1)
+    (remove <t>)
+)
+
+;; Clean up remaining tallies (< 2, > 3, or count 2 for dead cells)
+(p discard-tally [salience 20]
+    (step ^phase evaluate)
+    <t> (tally ^r <r> ^c <c>)
+  -->
+    (remove <t>)
+)
+
+;; When all tallies are processed, transition to cell update phase.
+(p transition-eval-to-update [salience 1]
+    <st> (step ^phase evaluate)
+    -(tally)
+  -->
+    (modify <st> ^phase clear-cells)
+)
+
+;; ------------------------------------------------------------------------------
+;; Stage 4: CLEAR OLD CELLS & PROMOTE NEXT GENERATION
+;; Removes previous generation's cells, then promotes next-cell facts.
+;; ------------------------------------------------------------------------------
+(p clear-old-cell [salience 20]
+    (step ^phase clear-cells)
+    <c> (cell ^alive 1)
+  -->
+    (remove <c>)
+)
+
+(p transition-clear-to-promote [salience 1]
+    <st> (step ^phase clear-cells)
+    -(cell ^alive 1)
+  -->
+    (modify <st> ^phase promote)
+)
+
+(p promote-next-cell [salience 20]
+    (step ^phase promote)
+    <nc> (next-cell ^r <r> ^c <c> ^alive 1)
+  -->
+    (make cell ^r <r> ^c <c> ^alive 1)
+    (remove <nc>)
+)
+
+;; ------------------------------------------------------------------------------
+;; Stage 5: QUIESCENCE
+;; Advance generation counter and enter ready phase.
+;; The engine pauses in quiescence until Go initiates the next generation.
+;; ------------------------------------------------------------------------------
+(p finish-step [salience 1]
+    <st> (step ^phase promote ^generation <g>)
+    -(next-cell)
+  -->
+    (bind <next-g> (compute <g> + 1))
+    (modify <st> ^phase ready ^generation <next-g>)
+)
