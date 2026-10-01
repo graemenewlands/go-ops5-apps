@@ -14,6 +14,7 @@ This repository demonstrates how classic forward-chaining production rules, conf
 | Application | Domain | Technologies | Status |
 | :--- | :--- | :--- | :--- |
 | [**Conway's Game of Life**](#1-conways-game-of-life-webassembly) | Cellular Automata & Simulation | WebAssembly, HTML5 Canvas, OPS5 Rete | **Live** |
+| [**Schema & Materialized View Synthesizer**](#2-schema--materialized-view-synthesizer-webassembly) | Database Modeling & View Synthesis | WebAssembly, Interactive E-R Diagram, OPS5 Rules | **Live** |
 | **E-Commerce & Fraud Detection** | Business Rules Engine & CEP | Go 1.23, Custom Actions, Dynamic Rules | *Planned* |
 | **IoT Smart Facility Monitoring** | Event Stream Processing | Reactive Joins, Negative Conditions | *Planned* |
 | **Diagnostic Expert System** | Goal-Directed AI | Means-Ends Analysis (MEA Strategy) | *Planned* |
@@ -101,31 +102,93 @@ make test
 
 ---
 
+## 2. Schema & Materialized View Synthesizer (WebAssembly)
+
+An interactive, browser-based relational schema graph modeler and materialized view generator. **Tables, columns, 1-N foreign keys, and M-N relationships are represented directly as Working Memory Elements (WMEs)** in the OPS5 engine, and **joins are modeled as forward-chaining production rules**.
+
+When you select target fields on the interactive Entity-Relationship (E-R) diagram and click **"Done: Synthesize Materialized View"**, the OPS5 Rete network automatically discovers join paths, bridges multi-hop entities, resolves Many-to-Many junction tables, projects denormalized columns with alias conflict resolution, and synthesizes a production SQL materialized view definition with a live sample data preview.
+
+```mermaid
+flowchart TD
+    A["Select Fields on E-R Diagram\n(e.g., Customer.Name, Track.Title)"] --> B["Assert 'selected_field' WMEs"]
+    B --> C["Phase: identify-tables\n(Mark needed table entities)"]
+    C --> D["Phase: resolve-mn\n(Detect & bridge M-N junction tables)"]
+    D --> E["Phase: resolve-bridge\n(Infer multi-hop transitive relations)"]
+    E --> F["Phase: generate-joins\n(Joins-as-Rules infer active join edges)"]
+    F --> G["Phase: project-columns\n(Disambiguate aliases & assign types)"]
+    G --> H["Phase: synthesize-view\n(Pick grain/root table & output view WME)"]
+    H --> I["Display Materialized View Schema, SQL & Sample Data Table"]
+```
+
+### Key Architectural Highlights
+
+1. **Relational Schema as Facts**:
+   - `table`: Name, display title, primary key.
+   - `field`: Table, column name, data type, `is_pk`, `is_fk`.
+   - `relation`: 1-N / N-1 foreign key relationships between tables.
+   - `mn_relationship`: Many-to-Many associations with junction tables (e.g. `PlaylistTrack` between `Playlist` and `Track`, or `OrderDetails` between `Orders` and `Products`).
+2. **Joins as Declarative Rules**:
+   Instead of writing procedural graph algorithms (Dijkstra, BFS), joins and path discovery are evaluated purely by OPS5 pattern matching:
+   - Direct join rules fire when two needed tables share a foreign key relation.
+   - M-N rules automatically pull junction tables into working memory.
+   - Bridge rules discover intermediate tables needed to connect distant entities.
+3. **Automated View Synthesis & Disambiguation**:
+   - Analyzes selected fields, identifies root driving table (lowest grain or junction table).
+   - Generates disambiguated aliases when identical column names collide (e.g. `artist_name` vs `track_name`).
+   - Produces formatted `CREATE MATERIALIZED VIEW ... AS SELECT ... FROM ... JOIN ... ON ...`.
+   - Evaluates in-memory joins over realistic sample data to render an instant preview table.
+4. **Multi-Schema Support**:
+   - **Chinook (Default)**: 11 tables representing artists, albums, tracks, genres, invoices, customers, and playlist M-N associations.
+   - **Northwind**: 8 core tables with customers, orders, order details (M-N), products, categories, suppliers, and employees.
+
+---
+
+### Quick Start & Running Locally
+
+#### Launch Schema & Materialized View Synthesizer:
+```bash
+# Using make (starts dev server on port 8081)
+make serve-schema
+
+# Or using the Go toolchain directly
+GOOS=js GOARCH=wasm go build -o apps/schema/web/main.wasm ./apps/schema/wasm
+go run ./apps/schema/server -port 8081
+```
+Open your browser to: **[http://localhost:8081](http://localhost:8081)**
+
+#### Run Automated Test Suite:
+```bash
+make test
+```
+Verifies pattern oscillations for Game of Life and multi-table join tree resolutions, M-N junction inferences, and schema switching for the Schema View Synthesizer.
+
+---
+
 ### Repository Structure
 
 ```
 go-ops5-apps/
 ├── README.md                  # Showcase documentation and usage guide
 ├── Makefile                   # Automation for building Wasm, running tests, and serving
-├── go.mod                     # Go module definitions
+├── go.mod                     # Go module definitions (github.com/graemenewlands/ops5)
 ├── go.sum                     # Go module checksums
 ├── .gitignore                 # Standard Go ignore patterns
 └── apps/
-    └── life/
-        ├── rules/
-        │   └── life.ops       # Declarative OPS5 rule definitions for Conway's Game of Life
-        ├── engine.go          # Go LifeEngine wrapper managing OPS5 working memory and grid
-        ├── life_test.go       # Automated tests verifying Conway patterns
-        ├── wasm/
-        │   └── main.go        # Go WebAssembly entrypoint with syscall/js bridge
-        ├── server/
-        │   └── main.go        # Static HTTP server with application/wasm MIME mapping
-        └── web/
-            ├── index.html     # HTML5 canvas frontend with stats and control panel
-            ├── style.css      # Dark-mode responsive styling
-            ├── app.js         # Canvas rendering, mouse painting, and animation loop
-            ├── wasm_exec.js   # Official Go 1.23 WebAssembly runtime glue
-            └── main.wasm      # Compiled WebAssembly binary
+    ├── life/                  # Conway's Game of Life in OPS5
+    │   ├── rules/life.ops     # 5-stage declarative cellular automaton rules
+    │   ├── engine.go          # Go LifeEngine wrapper
+    │   ├── life_test.go       # Conway pattern unit tests
+    │   ├── wasm/main.go       # WebAssembly syscall/js entrypoint
+    │   ├── server/main.go     # Local HTTP development server
+    │   └── web/               # HTML5 Canvas interface and wasm artifacts
+    └── schema/                # Schema & Materialized View Synthesizer
+        ├── rules/schema.ops   # OPS5 join rules and view synthesis pipeline
+        ├── data/              # Chinook & Northwind schemas and sample datasets
+        ├── engine.go          # Go SchemaEngine managing working memory & joins
+        ├── schema_test.go     # Unit tests verifying join inference and SQL synthesis
+        ├── wasm/main.go       # WebAssembly syscall/js entrypoint
+        ├── server/main.go     # Local HTTP development server
+        └── web/               # Interactive E-R Diagram & Materialized View UI
 ```
 
 ---

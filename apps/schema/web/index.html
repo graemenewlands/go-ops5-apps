@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OPS5 Schema & Materialized View Synthesizer</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+  <!-- Loading overlay -->
+  <div id="loading-overlay" class="loading-overlay">
+    <div class="spinner"></div>
+    <div class="loading-text">Initializing OPS5 Rete Network in WebAssembly...</div>
+    <div class="loading-subtext">Asserting relational schema WMEs & compiling production rules</div>
+  </div>
+
+  <!-- Header -->
+  <header class="app-header">
+    <div class="header-left">
+      <div class="logo-badge">OPS5</div>
+      <div>
+        <h1>Schema & Materialized View Synthesizer</h1>
+        <p class="subtitle">Relational schema graph traversal, join inference, and denormalized view synthesis powered by the <strong>OPS5 Rule Engine</strong> in WebAssembly</p>
+      </div>
+    </div>
+    <div class="header-right">
+      <div class="schema-select-wrapper">
+        <label for="select-schema">Schema:</label>
+        <select id="select-schema" class="schema-select">
+          <option value="chinook" selected>Chinook (Digital Media Store — 11 Tables)</option>
+          <option value="northwind">Northwind Traders (E-Commerce — 8 Tables)</option>
+        </select>
+      </div>
+      <div class="header-badges">
+        <span class="badge badge-wasm">WebAssembly</span>
+        <span class="badge badge-go">Go 1.23</span>
+        <a href="https://pkg.go.dev/github.com/graemenewlands/ops5" target="_blank" rel="noopener" class="badge badge-link">ops5 v0.3.2 ↗</a>
+        <button id="btn-toggle-inspector" class="btn btn-secondary">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>
+          <span>OPS5 Rules</span>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- Presets bar -->
+  <section class="presets-bar">
+    <span class="presets-label">Preset Selections:</span>
+    <div id="presets-container" class="presets-container">
+      <!-- Preset buttons injected by JS -->
+    </div>
+  </section>
+
+  <!-- Main workspace -->
+  <main class="app-main">
+    <!-- E-R Diagram Section -->
+    <section class="diagram-section">
+      <div class="diagram-toolbar">
+        <div class="toolbar-left">
+          <span class="section-title">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><line x1="3" y1="9" x2="21" y2="9"></line><line x1="9" y1="21" x2="9" y2="9"></line></svg>
+            Interactive Entity-Relationship (E-R) Diagram
+          </span>
+          <span class="badge-hint">Click fields or drag table cards</span>
+        </div>
+        <div class="toolbar-center">
+          <div class="zoom-controls">
+            <button id="btn-zoom-in" class="btn btn-icon" title="Zoom In">+</button>
+            <button id="btn-zoom-out" class="btn btn-icon" title="Zoom Out">−</button>
+            <button id="btn-zoom-fit" class="btn btn-icon" title="Reset View">⛶</button>
+          </div>
+          <div class="search-box">
+            <input type="text" id="input-field-search" placeholder="Filter fields..." />
+          </div>
+        </div>
+        <div class="toolbar-right">
+          <span id="selection-counter" class="selection-counter">0 fields selected</span>
+          <button id="btn-clear-selection" class="btn btn-secondary btn-sm">Clear</button>
+          <button id="btn-generate-view" class="btn btn-primary">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
+            <span>Done: Synthesize Materialized View</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Diagram Canvas Container -->
+      <div id="diagram-container" class="diagram-container">
+        <svg id="diagram-svg" class="diagram-svg">
+          <defs>
+            <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+              <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#38bdf8"></path>
+            </marker>
+            <marker id="arrow-active" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M 0 1 L 9 5 L 0 9 z" fill="#10b981"></path>
+            </marker>
+          </defs>
+          <g id="diagram-transform-group">
+            <g id="diagram-links-layer"></g>
+            <g id="diagram-tables-layer"></g>
+          </g>
+        </svg>
+      </div>
+    </section>
+
+    <!-- Materialized View Output Section (Below E-R Diagram) -->
+    <section id="view-section" class="view-section">
+      <div class="view-header">
+        <div class="view-title-group">
+          <h2>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path><polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline><line x1="12" y1="22.08" x2="12" y2="12"></line></svg>
+            Generated Materialized View
+          </h2>
+          <p id="view-subtitle" class="subtitle">Synthesized denormalized schema and query plan inferred by OPS5 production rules</p>
+        </div>
+      </div>
+
+      <!-- Initial empty state -->
+      <div id="view-empty-state" class="view-empty-state">
+        <div class="empty-icon">⚡</div>
+        <h3>No Materialized View Generated Yet</h3>
+        <p>Select target fields on the E-R diagram above (or pick a preset query) and click <strong>"Done: Synthesize Materialized View"</strong> to run the OPS5 production rules.</p>
+      </div>
+
+      <!-- Result content -->
+      <div id="view-result-content" class="view-result-content" style="display: none;">
+        <!-- Metrics / Performance stats bar -->
+        <div class="metrics-grid">
+          <div class="metric-card">
+            <div class="metric-label">Rule Cycles Fired</div>
+            <div id="stat-cycles" class="metric-value">0</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">Inference Latency</div>
+            <div id="stat-time" class="metric-value">0.00 ms</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">Active WMEs</div>
+            <div id="stat-wmes" class="metric-value">0</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">Inferred Joins</div>
+            <div id="stat-joins" class="metric-value">0</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">Root Table (Grain)</div>
+            <div id="stat-root" class="metric-value text-accent">-</div>
+          </div>
+        </div>
+
+        <!-- Join Tree & Path explanation -->
+        <div class="card join-tree-card">
+          <div class="card-header">
+            <h3>Inferred Join Tree & Graph Traversal</h3>
+            <span class="badge badge-subtle">OPS5 Relational Spanning Path</span>
+          </div>
+          <div id="join-path-container" class="join-path-container">
+            <!-- Injected by JS -->
+          </div>
+        </div>
+
+        <!-- Materialized View Schema Definition -->
+        <div class="card schema-card">
+          <div class="card-header">
+            <h3>Denormalized View Schema (<code id="view-schema-name">mv_denormalized_data</code>)</h3>
+            <span id="col-count-badge" class="badge badge-subtle">0 Columns</span>
+          </div>
+          <div class="table-responsive">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Output Column</th>
+                  <th>Source Table</th>
+                  <th>Source Column</th>
+                  <th>Data Type</th>
+                  <th>Key Role</th>
+                </tr>
+              </thead>
+              <tbody id="schema-columns-tbody">
+                <!-- Injected by JS -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Synthesized SQL Statement -->
+        <div class="card sql-card">
+          <div class="card-header">
+            <h3>Synthesized SQL Definition</h3>
+            <button id="btn-copy-sql" class="btn btn-secondary btn-sm">Copy SQL</button>
+          </div>
+          <pre><code id="sql-code-block" class="language-sql"></code></pre>
+        </div>
+
+        <!-- Sample Materialized Data Preview -->
+        <div class="card data-preview-card">
+          <div class="card-header">
+            <h3>Materialized Sample Data Preview</h3>
+            <span id="row-count-badge" class="badge badge-subtle">0 Rows Materialized</span>
+          </div>
+          <div class="table-responsive">
+            <table id="preview-data-table" class="data-table">
+              <thead id="preview-data-thead"></thead>
+              <tbody id="preview-data-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Slide-out Rule Inspector Drawer -->
+  <aside id="rule-drawer" class="rule-drawer">
+    <div class="rule-drawer-header">
+      <h2>OPS5 Production Rules (schema.ops)</h2>
+      <button id="btn-close-drawer" class="btn btn-icon" title="Close Drawer">&times;</button>
+    </div>
+    <div class="rule-drawer-content">
+      <p class="drawer-description">
+        Below is the exact OPS5 production rule source code executing in WebAssembly. The engine matches table facts, foreign-key relations, and M-N junctions to discover join paths, resolve bridge tables, and project denormalized view columns.
+      </p>
+      <pre><code id="rule-code-block" class="language-ops5">Loading rules...</code></pre>
+    </div>
+  </aside>
+  <div id="drawer-backdrop" class="drawer-backdrop"></div>
+
+  <!-- Toast notification -->
+  <div id="toast" class="toast"></div>
+
+  <!-- Scripts -->
+  <script src="wasm_exec.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

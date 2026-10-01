@@ -1,0 +1,343 @@
+;; ==============================================================================
+;; Relational Schema & Materialized View Synthesizer in OPS5 Production Rules
+;;
+;; Models database tables, fields, 1-N foreign keys, and M-N relationships
+;; as Working Memory Elements (WMEs).
+;; When the user selects target fields, forward-chaining production rules
+;; discover join paths across the relational graph, resolve M-N junction
+;; tables, project denormalized columns, and synthesize a materialized view.
+;; ==============================================================================
+
+;; ------------------------------------------------------------------------------
+;; Class Declarations (literalize)
+;; ------------------------------------------------------------------------------
+(literalize query_control phase status)
+(literalize table name display pk)
+(literalize field table name type is_pk is_fk)
+(literalize relation name from_table from_col to_table to_col type)
+(literalize mn_relationship junction_table left_table left_fk right_table right_fk)
+(literalize selected_field table column type)
+
+(literalize needed_table name is_root is_junction)
+(literalize active_join left_table left_col right_table right_col join_type)
+(literalize view_column name source_table source_col type)
+(literalize materialized_view name root_table)
+
+;; ------------------------------------------------------------------------------
+;; Stage 1: IDENTIFY NEEDED TABLES
+;; For every field selected by the user, mark its enclosing table as needed.
+;; ------------------------------------------------------------------------------
+(p mark-needed-table [salience 50]
+    (query_control ^phase identify-tables)
+    (selected_field ^table <tbl>)
+    -(needed_table ^name <tbl>)
+  -->
+    (make needed_table ^name <tbl> ^is_root 0 ^is_junction 0)
+)
+
+(p transition-identify-to-resolve-mn [salience 10]
+    <qc> (query_control ^phase identify-tables)
+  -->
+    (modify <qc> ^phase resolve-mn)
+)
+
+;; ------------------------------------------------------------------------------
+;; Stage 2: RESOLVE M-N JUNCTION RELATIONSHIPS
+;; If two needed tables participate in an M-N relationship, bring the junction table
+;; into working memory as a needed junction table.
+;; ------------------------------------------------------------------------------
+(p resolve-mn-junction [salience 50]
+    (query_control ^phase resolve-mn)
+    (needed_table ^name <left>)
+    (needed_table ^name <right>)
+    (mn_relationship ^junction_table <junc> ^left_table <left> ^right_table <right>)
+    -(needed_table ^name <junc>)
+  -->
+    (make needed_table ^name <junc> ^is_root 1 ^is_junction 1)
+)
+
+(p transition-resolve-mn-to-bridge [salience 10]
+    <qc> (query_control ^phase resolve-mn)
+  -->
+    (modify <qc> ^phase resolve-bridge)
+)
+
+;; ------------------------------------------------------------------------------
+;; Stage 3: RESOLVE MULTI-HOP BRIDGE TABLES
+;; If two needed tables have no direct join, but an intermediate table connects them
+;; (e.g. Track -> Album -> Artist, or InvoiceLine connecting Invoice and Track),
+;; automatically assert the bridge table into working memory.
+;; ------------------------------------------------------------------------------
+
+;; Bridge Pattern A: Intermediate table has foreign keys to both tables (common child/junction)
+;; e.g. InvoiceLine points to Invoice and Track
+(p resolve-bridge-child [salience 50]
+    (query_control ^phase resolve-bridge)
+    (needed_table ^name <t1>)
+    (needed_table ^name <t2> { <> <t1> })
+    (relation ^from_table <bridge> ^to_table <t1>)
+    (relation ^from_table <bridge> ^to_table <t2>)
+    -(needed_table ^name <bridge>)
+  -->
+    (make needed_table ^name <bridge> ^is_root 1 ^is_junction 1)
+)
+
+;; Bridge Pattern B: Intermediate table is a parent of t1 and child of t2
+;; e.g. Track (t1) -> Album (bridge) -> Artist (t2)
+(p resolve-bridge-chain [salience 45]
+    (query_control ^phase resolve-bridge)
+    (needed_table ^name <t1>)
+    (needed_table ^name <t2> { <> <t1> })
+    (relation ^from_table <t1> ^to_table <bridge>)
+    (relation ^from_table <bridge> ^to_table <t2>)
+    -(needed_table ^name <bridge>)
+  -->
+    (make needed_table ^name <bridge> ^is_root 0 ^is_junction 0)
+)
+
+;; Bridge Pattern C: 3-hop customer purchase bridge (Customer to Track via Invoice & InvoiceLine)
+(p resolve-bridge-customer-invoice [salience 40]
+    (query_control ^phase resolve-bridge)
+    (needed_table ^name Customer)
+    (needed_table ^name InvoiceLine)
+    -(needed_table ^name Invoice)
+  -->
+    (make needed_table ^name Invoice ^is_root 0 ^is_junction 0)
+)
+
+(p transition-bridge-to-generate-joins [salience 10]
+    <qc> (query_control ^phase resolve-bridge)
+  -->
+    (modify <qc> ^phase generate-joins)
+)
+
+;; ------------------------------------------------------------------------------
+;; Stage 4: GENERATE JOINS
+;; Joins represented as production rules over needed tables and relations.
+;; ------------------------------------------------------------------------------
+
+;; Generic 1-N / N-1 join rule driven by schema relation WMEs
+(p rule-apply-relation-join [salience 50]
+    (query_control ^phase generate-joins)
+    (needed_table ^name <from>)
+    (needed_table ^name <to>)
+    (relation ^from_table <from> ^from_col <fcol> ^to_table <to> ^to_col <tcol>)
+    -(active_join ^left_table <from> ^right_table <to>)
+    -(active_join ^left_table <to> ^right_table <from>)
+  -->
+    (make active_join ^left_table <from> ^left_col <fcol> ^right_table <to> ^right_col <tcol> ^join_type inner)
+)
+
+;; Specific domain join rules for explicit schema awareness:
+;; Chinook: Track <-> Album
+(p rule-join-track-album [salience 55]
+    (query_control ^phase generate-joins)
+    (needed_table ^name Track)
+    (needed_table ^name Album)
+    -(active_join ^left_table Track ^right_table Album)
+  -->
+    (make active_join ^left_table Track ^left_col AlbumId ^right_table Album ^right_col AlbumId ^join_type inner)
+)
+
+;; Chinook: Album <-> Artist
+(p rule-join-album-artist [salience 55]
+    (query_control ^phase generate-joins)
+    (needed_table ^name Album)
+    (needed_table ^name Artist)
+    -(active_join ^left_table Album ^right_table Artist)
+  -->
+    (make active_join ^left_table Album ^left_col ArtistId ^right_table Artist ^right_col ArtistId ^join_type inner)
+)
+
+;; Chinook: Track <-> Genre
+(p rule-join-track-genre [salience 55]
+    (query_control ^phase generate-joins)
+    (needed_table ^name Track)
+    (needed_table ^name Genre)
+    -(active_join ^left_table Track ^right_table Genre)
+  -->
+    (make active_join ^left_table Track ^left_col GenreId ^right_table Genre ^right_col GenreId ^join_type inner)
+)
+
+;; Chinook: Track <-> MediaType
+(p rule-join-track-mediatype [salience 55]
+    (query_control ^phase generate-joins)
+    (needed_table ^name Track)
+    (needed_table ^name MediaType)
+    -(active_join ^left_table Track ^right_table MediaType)
+  -->
+    (make active_join ^left_table Track ^left_col MediaTypeId ^right_table MediaType ^right_col MediaTypeId ^join_type inner)
+)
+
+;; Chinook: InvoiceLine <-> Track
+(p rule-join-invoiceline-track [salience 55]
+    (query_control ^phase generate-joins)
+    (needed_table ^name InvoiceLine)
+    (needed_table ^name Track)
+    -(active_join ^left_table InvoiceLine ^right_table Track)
+  -->
+    (make active_join ^left_table InvoiceLine ^left_col TrackId ^right_table Track ^right_col TrackId ^join_type inner)
+)
+
+;; Chinook: InvoiceLine <-> Invoice
+(p rule-join-invoiceline-invoice [salience 55]
+    (query_control ^phase generate-joins)
+    (needed_table ^name InvoiceLine)
+    (needed_table ^name Invoice)
+    -(active_join ^left_table InvoiceLine ^right_table Invoice)
+  -->
+    (make active_join ^left_table InvoiceLine ^left_col InvoiceId ^right_table Invoice ^right_col InvoiceId ^join_type inner)
+)
+
+;; Chinook: Invoice <-> Customer
+(p rule-join-invoice-customer [salience 55]
+    (query_control ^phase generate-joins)
+    (needed_table ^name Invoice)
+    (needed_table ^name Customer)
+    -(active_join ^left_table Invoice ^right_table Customer)
+  -->
+    (make active_join ^left_table Invoice ^left_col CustomerId ^right_table Customer ^right_col CustomerId ^join_type inner)
+)
+
+;; Chinook: Customer <-> Employee
+(p rule-join-customer-employee [salience 55]
+    (query_control ^phase generate-joins)
+    (needed_table ^name Customer)
+    (needed_table ^name Employee)
+    -(active_join ^left_table Customer ^right_table Employee)
+  -->
+    (make active_join ^left_table Customer ^left_col SupportRepId ^right_table Employee ^right_col EmployeeId ^join_type inner)
+)
+
+;; Chinook: PlaylistTrack <-> Playlist & Track
+(p rule-join-playlisttrack-playlist [salience 55]
+    (query_control ^phase generate-joins)
+    (needed_table ^name PlaylistTrack)
+    (needed_table ^name Playlist)
+    -(active_join ^left_table PlaylistTrack ^right_table Playlist)
+  -->
+    (make active_join ^left_table PlaylistTrack ^left_col PlaylistId ^right_table Playlist ^right_col PlaylistId ^join_type inner)
+)
+
+(p rule-join-playlisttrack-track [salience 55]
+    (query_control ^phase generate-joins)
+    (needed_table ^name PlaylistTrack)
+    (needed_table ^name Track)
+    -(active_join ^left_table PlaylistTrack ^right_table Track)
+  -->
+    (make active_join ^left_table PlaylistTrack ^left_col TrackId ^right_table Track ^right_col TrackId ^join_type inner)
+)
+
+;; Northwind: OrderDetails <-> Orders & Products
+(p rule-join-orderdetails-orders [salience 55]
+    (query_control ^phase generate-joins)
+    (needed_table ^name OrderDetails)
+    (needed_table ^name Orders)
+    -(active_join ^left_table OrderDetails ^right_table Orders)
+  -->
+    (make active_join ^left_table OrderDetails ^left_col OrderID ^right_table Orders ^right_col OrderID ^join_type inner)
+)
+
+(p rule-join-orderdetails-products [salience 55]
+    (query_control ^phase generate-joins)
+    (needed_table ^name OrderDetails)
+    (needed_table ^name Products)
+    -(active_join ^left_table OrderDetails ^right_table Products)
+  -->
+    (make active_join ^left_table OrderDetails ^left_col ProductID ^right_table Products ^right_col ProductID ^join_type inner)
+)
+
+;; Northwind: Orders <-> Customers
+(p rule-join-orders-customers [salience 55]
+    (query_control ^phase generate-joins)
+    (needed_table ^name Orders)
+    (needed_table ^name Customers)
+    -(active_join ^left_table Orders ^right_table Customers)
+  -->
+    (make active_join ^left_table Orders ^left_col CustomerID ^right_table Customers ^right_col CustomerID ^join_type inner)
+)
+
+;; Northwind: Orders <-> Employees
+(p rule-join-orders-employees [salience 55]
+    (query_control ^phase generate-joins)
+    (needed_table ^name Orders)
+    (needed_table ^name Employees)
+    -(active_join ^left_table Orders ^right_table Employees)
+  -->
+    (make active_join ^left_table Orders ^left_col EmployeeID ^right_table Employees ^right_col EmployeeID ^join_type inner)
+)
+
+;; Northwind: Products <-> Categories & Suppliers
+(p rule-join-products-categories [salience 55]
+    (query_control ^phase generate-joins)
+    (needed_table ^name Products)
+    (needed_table ^name Categories)
+    -(active_join ^left_table Products ^right_table Categories)
+  -->
+    (make active_join ^left_table Products ^left_col CategoryID ^right_table Categories ^right_col CategoryID ^join_type inner)
+)
+
+(p rule-join-products-suppliers [salience 55]
+    (query_control ^phase generate-joins)
+    (needed_table ^name Products)
+    (needed_table ^name Suppliers)
+    -(active_join ^left_table Products ^right_table Suppliers)
+  -->
+    (make active_join ^left_table Products ^left_col SupplierID ^right_table Suppliers ^right_col SupplierID ^join_type inner)
+)
+
+(p transition-joins-to-project [salience 10]
+    <qc> (query_control ^phase generate-joins)
+  -->
+    (modify <qc> ^phase project-columns)
+)
+
+;; ------------------------------------------------------------------------------
+;; Stage 5: PROJECT COLUMNS
+;; Projects each selected field into a denormalized view column.
+;; ------------------------------------------------------------------------------
+(p project-view-column [salience 50]
+    (query_control ^phase project-columns)
+    (selected_field ^table <tbl> ^column <col> ^type <typ>)
+    -(view_column ^source_table <tbl> ^source_col <col>)
+  -->
+    (make view_column ^name <col> ^source_table <tbl> ^source_col <col> ^type <typ>)
+)
+
+(p transition-project-to-synthesize [salience 10]
+    <qc> (query_control ^phase project-columns)
+  -->
+    (modify <qc> ^phase synthesize-view)
+)
+
+;; ------------------------------------------------------------------------------
+;; Stage 6: SYNTHESIZE MATERIALIZED VIEW
+;; Determines root driving table (prioritizing junction / lowest-grain tables)
+;; and completes the view specification.
+;; ------------------------------------------------------------------------------
+
+;; Prioritize junction table as root
+(p select-root-junction [salience 60]
+    (query_control ^phase synthesize-view)
+    (needed_table ^name <tbl> ^is_junction 1)
+    -(materialized_view)
+  -->
+    (make materialized_view ^name mv_denormalized_view ^root_table <tbl>)
+)
+
+;; Fallback to any needed table as root
+(p select-root-default [salience 40]
+    (query_control ^phase synthesize-view)
+    (needed_table ^name <tbl>)
+    -(materialized_view)
+  -->
+    (make materialized_view ^name mv_denormalized_view ^root_table <tbl>)
+)
+
+;; Finish and enter quiescence
+(p finish-view-synthesis [salience 10]
+    <qc> (query_control ^phase synthesize-view)
+    (materialized_view)
+  -->
+    (modify <qc> ^phase ready ^status complete)
+)
