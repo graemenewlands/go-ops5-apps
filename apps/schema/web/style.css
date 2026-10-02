@@ -396,9 +396,89 @@ body {
   font-weight: 600;
 }
 
+/* Selected Fields Active Tray */
+.selected-fields-tray {
+  background-color: var(--bg-tertiary);
+  border-bottom: 1px solid var(--border-color);
+  padding: 8px 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  min-height: 44px;
+}
+
+.tray-label {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--accent);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.selected-fields-list {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  flex: 1;
+}
+
+.selected-field-pill {
+  background-color: rgba(2, 132, 199, 0.25);
+  border: 1px solid var(--accent);
+  color: #fff;
+  padding: 3px 8px;
+  border-radius: 14px;
+  font-size: 0.75rem;
+  font-family: var(--font-mono);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+}
+
+.selected-field-pill .table-prefix {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.selected-field-pill .remove-field-btn {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 0.95rem;
+  line-height: 1;
+  padding: 0 2px;
+  transition: color 0.15s;
+}
+
+.selected-field-pill .remove-field-btn:hover {
+  color: #f87171;
+}
+
+.empty-tray-hint {
+  font-size: 0.775rem;
+  color: var(--text-dim);
+  font-style: italic;
+}
+
+.table-selected-badge {
+  background-color: var(--success);
+  color: #0f172a;
+  font-weight: 700;
+  font-size: 0.65rem;
+  padding: 1px 6px;
+  border-radius: 10px;
+  margin-left: 6px;
+}
+
 /* Diagram Container & SVG Canvas */
 .diagram-container {
-  height: 580px;
+  height: 620px;
   background-color: #080c14;
   background-image: 
     radial-gradient(#1e293b 1px, transparent 1px),

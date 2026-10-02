@@ -4,8 +4,8 @@ const state = {
   schema: null,
   selectedFields: new Map(), // key: "Table.Column" -> { table, column, type }
   tablePositions: new Map(), // key: "Table" -> { x, y }
-  pan: { x: 20, y: 20 },
-  zoom: 1.0,
+  pan: { x: 30, y: 20 },
+  zoom: 0.82,
   isDraggingCanvas: false,
   isDraggingTable: null,
   dragStart: { x: 0, y: 0 },
@@ -18,6 +18,9 @@ const elements = {
   loadingOverlay: document.getElementById('loading-overlay'),
   selectSchema: document.getElementById('select-schema'),
   presetsContainer: document.getElementById('presets-container'),
+  selectedFieldsTray: document.getElementById('selected-fields-tray'),
+  selectedFieldsList: document.getElementById('selected-fields-list'),
+  trayCount: document.getElementById('tray-count'),
   diagramContainer: document.getElementById('diagram-container'),
   diagramSvg: document.getElementById('diagram-svg'),
   transformGroup: document.getElementById('diagram-transform-group'),
@@ -237,6 +240,7 @@ function renderTableNode(table, pos) {
   header.innerHTML = `
     <div class="table-title">
       <span>${table.name}</span>
+      <span class="table-selected-badge" id="table-badge-${table.name}" style="display:none;">0 sel</span>
     </div>
     <span class="table-tag ${isJunction ? 'table-tag-mn' : ''}">${isJunction ? 'M-N' : 'Table'}</span>
   `;
@@ -317,9 +321,25 @@ function updateTableSelectionsInDOM() {
 
   state.schema.tables.forEach(t => {
     const card = document.getElementById(`table-card-${t.name}`);
-    const hasSelection = hasSelectedFieldInTable(t.name);
+    const badge = document.getElementById(`table-badge-${t.name}`);
+
+    let tableSelectedCount = 0;
+    t.columns.forEach(c => {
+      if (state.selectedFields.has(`${t.name}.${c.name}`)) {
+        tableSelectedCount++;
+      }
+    });
+
     if (card) {
-      card.classList.toggle('active-table', hasSelection);
+      card.classList.toggle('active-table', tableSelectedCount > 0);
+    }
+    if (badge) {
+      if (tableSelectedCount > 0) {
+        badge.innerText = `${tableSelectedCount} sel`;
+        badge.style.display = 'inline-block';
+      } else {
+        badge.style.display = 'none';
+      }
     }
 
     t.columns.forEach(c => {
@@ -340,6 +360,31 @@ function updateSelectionUI() {
   state.selectedFields.forEach(f => tableSet.add(f.table));
 
   elements.selectionCounter.innerText = `${count} field${count === 1 ? '' : 's'} across ${tableSet.size} table${tableSet.size === 1 ? '' : 's'}`;
+  if (elements.trayCount) {
+    elements.trayCount.innerText = count;
+  }
+
+  // Render dismissible pills in tray
+  if (elements.selectedFieldsList) {
+    elements.selectedFieldsList.innerHTML = '';
+    if (count === 0) {
+      elements.selectedFieldsList.innerHTML = '<span class="empty-tray-hint">Click column checkboxes or rows in table cards to add fields</span>';
+    } else {
+      state.selectedFields.forEach((field, key) => {
+        const pill = document.createElement('div');
+        pill.className = 'selected-field-pill';
+        pill.innerHTML = `
+          <span class="table-prefix">${field.table}.</span><span>${field.column}</span>
+          <button class="remove-field-btn" title="Remove field">&times;</button>
+        `;
+        pill.querySelector('.remove-field-btn').onclick = (e) => {
+          e.stopPropagation();
+          toggleFieldSelection(field.table, field.column, field.type);
+        };
+        elements.selectedFieldsList.appendChild(pill);
+      });
+    }
+  }
 }
 
 // Canvas Pan & Zoom Handlers

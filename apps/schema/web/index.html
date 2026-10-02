@@ -78,11 +78,22 @@
         </div>
         <div class="toolbar-right">
           <span id="selection-counter" class="selection-counter">0 fields selected</span>
-          <button id="btn-clear-selection" class="btn btn-secondary btn-sm">Clear</button>
+          <button id="btn-clear-selection" class="btn btn-secondary btn-sm">Clear All</button>
           <button id="btn-generate-view" class="btn btn-primary">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
             <span>Done: Synthesize Materialized View</span>
           </button>
+        </div>
+      </div>
+
+      <!-- Selected Fields Active Tray -->
+      <div id="selected-fields-tray" class="selected-fields-tray">
+        <div class="tray-label">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 11 12 14 22 4"></polyline><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path></svg>
+          <span>Active Selection (<span id="tray-count">0</span>):</span>
+        </div>
+        <div id="selected-fields-list" class="selected-fields-list">
+          <span class="empty-tray-hint">Click column checkboxes or rows in table cards to add fields</span>
         </div>
       </div>
 

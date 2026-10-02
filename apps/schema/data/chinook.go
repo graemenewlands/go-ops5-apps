@@ -134,8 +134,8 @@ func GetChinookSchema() *SchemaDef {
 				DisplayName: "Customers",
 				PKColumn:    "CustomerId",
 				Description: "Store customers and purchasers",
-				X:           840,
-				Y:           680,
+				X:           290,
+				Y:           460,
 				Columns: []ColumnDef{
 					{Name: "CustomerId", Type: "INTEGER", IsPK: true, Description: "Unique customer identifier"},
 					{Name: "FirstName", Type: "VARCHAR(40)", IsPK: false, Description: "Customer first name"},
@@ -152,8 +152,8 @@ func GetChinookSchema() *SchemaDef {
 				DisplayName: "Employees",
 				PKColumn:    "EmployeeId",
 				Description: "Company staff and customer support representatives",
-				X:           570,
-				Y:           680,
+				X:           30,
+				Y:           460,
 				Columns: []ColumnDef{
 					{Name: "EmployeeId", Type: "INTEGER", IsPK: true, Description: "Unique employee identifier"},
 					{Name: "FirstName", Type: "VARCHAR(20)", IsPK: false, Description: "First name"},
