@@ -165,6 +165,100 @@ func TestSingleTableSelection(t *testing.T) {
 	}
 }
 
+func TestSequentialQueriesAndSingleField(t *testing.T) {
+	eng, err := NewSchemaEngine("chinook")
+	if err != nil {
+		t.Fatalf("failed to create schema engine: %v", err)
+	}
+
+	// 1. Run multi-table query (Customer Music Purchases preset)
+	multiFields := [][2]string{
+		{"Customer", "LastName"},
+		{"Customer", "City"},
+		{"Invoice", "InvoiceDate"},
+		{"Track", "Name"},
+		{"Album", "Title"},
+		{"Artist", "Name"},
+		{"InvoiceLine", "UnitPrice"},
+		{"InvoiceLine", "Quantity"},
+	}
+	res1, err := eng.GenerateMaterializedView(multiFields)
+	if err != nil || !res1.Success {
+		t.Fatalf("res1 failed: %v, %v", err, res1)
+	}
+	if len(res1.Columns) != 8 {
+		t.Fatalf("expected 8 columns in res1, got %d", len(res1.Columns))
+	}
+	if len(res1.Joins) == 0 {
+		t.Fatalf("expected joins in res1, got 0")
+	}
+
+	// 2. Clear engine state
+	eng.Clear()
+
+	// 3. Now run a single field query: CustomerId from Customer
+	singleCustomer := [][2]string{
+		{"Customer", "CustomerId"},
+	}
+	res2, err := eng.GenerateMaterializedView(singleCustomer)
+	if err != nil || !res2.Success {
+		t.Fatalf("res2 failed: %v, %v", err, res2)
+	}
+
+	if len(res2.Columns) != 1 {
+		t.Fatalf("expected 1 column in res2, got %d: %v", len(res2.Columns), res2.Columns)
+	}
+	if len(res2.Joins) != 0 {
+		t.Fatalf("expected 0 joins in res2, got %d: %v", len(res2.Joins), res2.Joins)
+	}
+	if res2.RootTable != "Customer" {
+		t.Fatalf("expected root table Customer, got %s", res2.RootTable)
+	}
+	if !strings.Contains(res2.SQL, "FROM Customer") {
+		t.Fatalf("expected SQL FROM Customer, got: %s", res2.SQL)
+	}
+	if !strings.Contains(res2.SQL, "Customer.CustomerId") {
+		t.Fatalf("expected SQL to contain Customer.CustomerId, got: %s", res2.SQL)
+	}
+	if strings.Contains(res2.SQL, "JOIN") {
+		t.Fatalf("single table query should not have JOIN in SQL: %s", res2.SQL)
+	}
+
+	// 4. Test Employee single field (ensure no self-join on ReportsTo)
+	singleEmployee := [][2]string{
+		{"Employee", "FirstName"},
+	}
+	res3, err := eng.GenerateMaterializedView(singleEmployee)
+	if err != nil || !res3.Success {
+		t.Fatalf("res3 failed: %v, %v", err, res3)
+	}
+	if len(res3.Columns) != 1 {
+		t.Fatalf("expected 1 column in res3, got %d", len(res3.Columns))
+	}
+	if len(res3.Joins) != 0 {
+		t.Fatalf("expected 0 joins in res3 (no self join on ReportsTo), got %d: %v", len(res3.Joins), res3.Joins)
+	}
+	if res3.RootTable != "Employee" {
+		t.Fatalf("expected root table Employee, got %s", res3.RootTable)
+	}
+
+	// 5. Test another multi-table query after single fields
+	playlistFields := [][2]string{
+		{"Playlist", "Name"},
+		{"Track", "Name"},
+	}
+	res4, err := eng.GenerateMaterializedView(playlistFields)
+	if err != nil || !res4.Success {
+		t.Fatalf("res4 failed: %v, %v", err, res4)
+	}
+	if len(res4.Columns) != 2 {
+		t.Fatalf("expected 2 columns in res4, got %d", len(res4.Columns))
+	}
+	if len(res4.Joins) < 2 {
+		t.Fatalf("expected at least 2 joins for playlist-track M-N, got %d", len(res4.Joins))
+	}
+}
+
 func TestSchemaSwitch(t *testing.T) {
 	eng, err := NewSchemaEngine("chinook")
 	if err != nil {

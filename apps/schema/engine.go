@@ -206,23 +206,17 @@ func (se *SchemaEngine) GetSelectedFields() [][2]string {
 	return res
 }
 
-// GenerateMaterializedView executes OPS5 production rules to infer joins and synthesize the view.
-func (se *SchemaEngine) GenerateMaterializedView(selectedFields [][2]string) (*MaterializedViewResult, error) {
+// Clear removes all transient inference WMEs and clears selected fields.
+func (se *SchemaEngine) Clear() {
 	se.mu.Lock()
 	defer se.mu.Unlock()
 
-	if len(selectedFields) == 0 {
-		return &MaterializedViewResult{
-			Success:    false,
-			Error:      "No fields selected. Please select at least one field on the E-R diagram.",
-			SchemaID:   se.schemaDef.ID,
-			SchemaName: se.schemaDef.Name,
-		}, nil
-	}
+	se.selectedFields = nil
+	se.clearTransientWMEs()
+}
 
-	se.selectedFields = selectedFields
-
-	// Clear previous transient inference WMEs
+// clearTransientWMEs removes all inference and control WMEs from working memory.
+func (se *SchemaEngine) clearTransientWMEs() {
 	transientClasses := []string{
 		"query_control",
 		"selected_field",
@@ -237,6 +231,31 @@ func (se *SchemaEngine) GenerateMaterializedView(selectedFields [][2]string) (*M
 			_, _ = se.eng.Remove(w.Timetag)
 		}
 	}
+}
+
+// GenerateMaterializedView executes OPS5 production rules to infer joins and synthesize the view.
+func (se *SchemaEngine) GenerateMaterializedView(selectedFields [][2]string) (*MaterializedViewResult, error) {
+	se.mu.Lock()
+	defer se.mu.Unlock()
+
+	if len(selectedFields) == 0 {
+		return &MaterializedViewResult{
+			Success:        false,
+			Error:          "No fields selected. Please select at least one field on the E-R diagram.",
+			SchemaID:       se.schemaDef.ID,
+			SchemaName:     se.schemaDef.Name,
+			Columns:        make([]MaterializedColumn, 0),
+			Joins:          make([]MaterializedJoin, 0),
+			SampleRows:     make([]map[string]any, 0),
+			NeededTables:   make([]string, 0),
+			SelectedFields: make([][2]string, 0),
+		}, nil
+	}
+
+	se.selectedFields = selectedFields
+
+	// Clear previous transient inference WMEs
+	se.clearTransientWMEs()
 
 	// Look up types for selected fields
 	colTypeMap := make(map[string]string)
@@ -282,7 +301,7 @@ func (se *SchemaEngine) GenerateMaterializedView(selectedFields [][2]string) (*M
 
 	// Extract results from working memory
 	neededTableWMEs := se.eng.WorkingMemory().FindByClass("needed_table")
-	var neededTables []string
+	neededTables := make([]string, 0, len(neededTableWMEs))
 	for _, w := range neededTableWMEs {
 		if nameVal, ok := w.Get("name"); ok {
 			neededTables = append(neededTables, fmt.Sprintf("%v", nameVal.Raw()))
@@ -304,7 +323,7 @@ func (se *SchemaEngine) GenerateMaterializedView(selectedFields [][2]string) (*M
 
 	// Extract active joins
 	joinWMEs := se.eng.WorkingMemory().FindByClass("active_join")
-	var joins []MaterializedJoin
+	joins := make([]MaterializedJoin, 0)
 	seenJoins := make(map[string]bool)
 
 	for _, w := range joinWMEs {
@@ -341,7 +360,7 @@ func (se *SchemaEngine) GenerateMaterializedView(selectedFields [][2]string) (*M
 
 	// Extract projected columns & compute unique aliases
 	colWMEs := se.eng.WorkingMemory().FindByClass("view_column")
-	var rawCols []MaterializedColumn
+	rawCols := make([]MaterializedColumn, 0, len(colWMEs))
 	colNameFreq := make(map[string]int)
 
 	for _, w := range colWMEs {
@@ -375,7 +394,7 @@ func (se *SchemaEngine) GenerateMaterializedView(selectedFields [][2]string) (*M
 	}
 
 	// Assign disambiguated column aliases if duplicates exist
-	var projectedCols []MaterializedColumn
+	projectedCols := make([]MaterializedColumn, 0, len(rawCols))
 	for _, c := range rawCols {
 		finalName := c.Name
 		if colNameFreq[c.Name] > 1 {
@@ -402,6 +421,9 @@ func (se *SchemaEngine) GenerateMaterializedView(selectedFields [][2]string) (*M
 
 	// Materialize sample data rows using the inferred joins
 	sampleRows := se.materializeSampleRows(rootTable, orderedJoins, projectedCols)
+	if sampleRows == nil {
+		sampleRows = make([]map[string]any, 0)
+	}
 
 	result := &MaterializedViewResult{
 		Success:        true,
@@ -440,11 +462,11 @@ func findSelectionIndex(selected [][2]string, table, col string) int {
 // orderJoinsFromRoot sorts and orients joins so each joined table attaches to an already reached table.
 func orderJoinsFromRoot(root string, joins []MaterializedJoin) []MaterializedJoin {
 	if len(joins) == 0 {
-		return joins
+		return make([]MaterializedJoin, 0)
 	}
 
 	reached := map[string]bool{root: true}
-	var ordered []MaterializedJoin
+	ordered := make([]MaterializedJoin, 0, len(joins))
 	remaining := make([]MaterializedJoin, len(joins))
 	copy(remaining, joins)
 
@@ -514,7 +536,7 @@ func buildMaterializedViewSQL(viewName, rootTable string, joins []MaterializedJo
 func (se *SchemaEngine) materializeSampleRows(rootTable string, joins []MaterializedJoin, cols []MaterializedColumn) []map[string]any {
 	rootData := se.schemaDef.SampleData[rootTable]
 	if len(rootData) == 0 {
-		return nil
+		return make([]map[string]any, 0)
 	}
 
 	// Working state: slice of composite rows with prefix Table.Column
@@ -571,7 +593,7 @@ func (se *SchemaEngine) materializeSampleRows(rootTable string, joins []Material
 	}
 
 	// Project target view columns
-	var outputRows []map[string]any
+	outputRows := make([]map[string]any, 0, len(currentRows))
 	for _, cr := range currentRows {
 		row := make(map[string]any)
 		for _, c := range cols {

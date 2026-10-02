@@ -21,6 +21,7 @@ func main() {
 	js.Global().Set("schemaGetDefinition", js.FuncOf(schemaGetDefinition))
 	js.Global().Set("schemaGetAvailableSchemas", js.FuncOf(schemaGetAvailableSchemas))
 	js.Global().Set("schemaGenerateView", js.FuncOf(schemaGenerateView))
+	js.Global().Set("schemaClear", js.FuncOf(schemaClear))
 	js.Global().Set("schemaGetRuleSource", js.FuncOf(schemaGetRuleSource))
 
 	// Signal to JS that Wasm module is loaded and ready
@@ -158,6 +159,13 @@ func schemaGenerateView(this js.Value, args []js.Value) any {
 	}
 
 	return parsed
+}
+
+func schemaClear(this js.Value, args []js.Value) any {
+	if currentEngine != nil {
+		currentEngine.Clear()
+	}
+	return map[string]any{"success": true}
 }
 
 func schemaGetRuleSource(this js.Value, args []js.Value) any {

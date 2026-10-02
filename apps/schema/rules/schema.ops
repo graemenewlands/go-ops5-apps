@@ -49,7 +49,7 @@
 (p resolve-mn-junction [salience 50]
     (query_control ^phase resolve-mn)
     (needed_table ^name <left>)
-    (needed_table ^name <right>)
+    (needed_table ^name <right> { <> <left> })
     (mn_relationship ^junction_table <junc> ^left_table <left> ^right_table <right>)
     -(needed_table ^name <junc>)
   -->
@@ -120,7 +120,7 @@
 (p rule-apply-relation-join [salience 50]
     (query_control ^phase generate-joins)
     (needed_table ^name <from>)
-    (needed_table ^name <to>)
+    (needed_table ^name <to> { <> <from> })
     (relation ^from_table <from> ^from_col <fcol> ^to_table <to> ^to_col <tcol>)
     -(active_join ^left_table <from> ^right_table <to>)
     -(active_join ^left_table <to> ^right_table <from>)

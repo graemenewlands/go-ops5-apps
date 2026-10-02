@@ -113,6 +113,9 @@ function loadSchemaDefinition() {
   renderPresets();
   renderDiagram();
   updateSelectionUI();
+  if (typeof window.schemaClear === 'function') {
+    window.schemaClear();
+  }
   resetMaterializedViewSection();
 }
 
@@ -470,6 +473,10 @@ elements.inputFieldSearch.addEventListener('input', (e) => {
 // Clear selection
 elements.btnClearSelection.onclick = () => {
   state.selectedFields.clear();
+  state.lastResult = null;
+  if (typeof window.schemaClear === 'function') {
+    window.schemaClear();
+  }
   document.querySelectorAll('.preset-chip').forEach(c => c.classList.remove('active'));
   updateTableSelectionsInDOM();
   updateSelectionUI();
@@ -508,30 +515,36 @@ function generateMaterializedView() {
 }
 
 function renderMaterializedViewResult(res) {
+  if (!res) return;
+
+  const joins = Array.isArray(res.joins) ? res.joins : [];
+  const columns = Array.isArray(res.columns) ? res.columns : [];
+  const stats = res.stats || {};
+
   elements.viewEmptyState.style.display = 'none';
   elements.viewResultContent.style.display = 'block';
 
   // Stats
-  elements.statCycles.innerText = res.stats.cycleCount;
-  elements.statTime.innerText = `${res.stats.elapsedMs.toFixed(2)} ms`;
-  elements.statWmes.innerText = res.stats.wmeCount;
-  elements.statJoins.innerText = res.joins.length;
+  elements.statCycles.innerText = stats.cycleCount ?? 0;
+  elements.statTime.innerText = `${(stats.elapsedMs ?? 0).toFixed(2)} ms`;
+  elements.statWmes.innerText = stats.wmeCount ?? 0;
+  elements.statJoins.innerText = joins.length;
   elements.statRoot.innerText = res.rootTable || '-';
 
   // Join Path Chips
   elements.joinPathContainer.innerHTML = '';
   const rootChip = document.createElement('div');
   rootChip.className = 'join-chip root-chip';
-  rootChip.innerHTML = `<strong>FROM</strong> <span>${res.rootTable}</span>`;
+  rootChip.innerHTML = `<strong>FROM</strong> <span>${res.rootTable || '-'}</span>`;
   elements.joinPathContainer.appendChild(rootChip);
 
-  if (res.joins.length === 0) {
+  if (joins.length === 0) {
     const singleChip = document.createElement('div');
     singleChip.className = 'join-chip';
     singleChip.innerText = "Single Table (No Joins Required)";
     elements.joinPathContainer.appendChild(singleChip);
   } else {
-    res.joins.forEach(j => {
+    joins.forEach(j => {
       const arrow = document.createElement('span');
       arrow.className = 'join-arrow';
       arrow.innerText = '➔';
@@ -545,10 +558,10 @@ function renderMaterializedViewResult(res) {
   }
 
   // Schema Columns Table
-  elements.colCountBadge.innerText = `${res.columns.length} Columns`;
+  elements.colCountBadge.innerText = `${columns.length} Columns`;
   elements.schemaColumnsTbody.innerHTML = '';
 
-  res.columns.forEach(c => {
+  columns.forEach(c => {
     const tr = document.createElement('tr');
     const isRenamed = c.name.toLowerCase() !== c.sourceCol.toLowerCase();
     const roleBadge = c.isPk ? '<span class="badge" style="background:#f59e0b22;color:#f59e0b;">Primary Key</span>' : '<span class="badge badge-subtle">Dimension/Measure</span>';
@@ -565,7 +578,7 @@ function renderMaterializedViewResult(res) {
   });
 
   // SQL code block
-  elements.sqlCodeBlock.innerText = res.sql;
+  elements.sqlCodeBlock.innerText = res.sql || '';
 
   // Sample data preview
   renderSampleDataPreview(res);
@@ -575,17 +588,20 @@ function renderSampleDataPreview(res) {
   elements.previewDataThead.innerHTML = '';
   elements.previewDataTbody.innerHTML = '';
 
-  if (!res.sampleRows || res.sampleRows.length === 0) {
+  const columns = Array.isArray(res.columns) ? res.columns : [];
+  const sampleRows = Array.isArray(res.sampleRows) ? res.sampleRows : [];
+
+  if (sampleRows.length === 0) {
     elements.rowCountBadge.innerText = '0 Rows Materialized';
     elements.previewDataTbody.innerHTML = '<tr><td colspan="10" style="text-align:center;color:var(--text-dim);">No matching sample rows found for join criteria</td></tr>';
     return;
   }
 
-  elements.rowCountBadge.innerText = `${res.sampleRows.length} Rows Materialized`;
+  elements.rowCountBadge.innerText = `${sampleRows.length} Rows Materialized`;
 
   // Header row
   const headerTr = document.createElement('tr');
-  res.columns.forEach(c => {
+  columns.forEach(c => {
     const th = document.createElement('th');
     th.innerText = c.name;
     headerTr.appendChild(th);
@@ -593,9 +609,9 @@ function renderSampleDataPreview(res) {
   elements.previewDataThead.appendChild(headerTr);
 
   // Data rows
-  res.sampleRows.forEach(row => {
+  sampleRows.forEach(row => {
     const tr = document.createElement('tr');
-    res.columns.forEach(c => {
+    columns.forEach(c => {
       const td = document.createElement('td');
       const val = row[c.name];
       if (val === null || val === undefined) {
@@ -610,8 +626,24 @@ function renderSampleDataPreview(res) {
 }
 
 function resetMaterializedViewSection() {
+  state.lastResult = null;
   elements.viewEmptyState.style.display = 'block';
   elements.viewResultContent.style.display = 'none';
+
+  // Fully reset all rendered fields
+  elements.statCycles.innerText = '0';
+  elements.statTime.innerText = '0.00 ms';
+  elements.statWmes.innerText = '0';
+  elements.statJoins.innerText = '0';
+  elements.statRoot.innerText = '-';
+
+  elements.joinPathContainer.innerHTML = '';
+  elements.colCountBadge.innerText = '0 Columns';
+  elements.schemaColumnsTbody.innerHTML = '';
+  elements.sqlCodeBlock.innerText = '';
+  elements.rowCountBadge.innerText = '0 Rows Materialized';
+  elements.previewDataThead.innerHTML = '';
+  elements.previewDataTbody.innerHTML = '';
 }
 
 // Copy SQL button
