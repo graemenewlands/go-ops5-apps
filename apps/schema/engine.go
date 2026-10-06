@@ -355,8 +355,54 @@ func (se *SchemaEngine) GenerateMaterializedView(selectedFields [][2]string) (*M
 		})
 	}
 
+	// Build map of tables selected by the user
+	selectedTableMap := make(map[string]bool)
+	for _, sf := range selectedFields {
+		selectedTableMap[sf[0]] = true
+	}
+
 	// Order joins sequentially starting from rootTable
-	orderedJoins := orderJoinsFromRoot(rootTable, joins)
+	orderedJoins, reached := orderJoinsFromRoot(rootTable, joins)
+
+	// Verify that all selected tables are connected via the join graph
+	var unreached []string
+	for tbl := range selectedTableMap {
+		if !reached[tbl] {
+			unreached = append(unreached, tbl)
+		}
+	}
+	sort.Strings(unreached)
+
+	if len(unreached) > 0 {
+		var selectedList []string
+		for tbl := range selectedTableMap {
+			selectedList = append(selectedList, tbl)
+		}
+		sort.Strings(selectedList)
+
+		return &MaterializedViewResult{
+			Success:        false,
+			Error:          fmt.Sprintf("No connection between selected tables (%s). Unable to synthesize a valid materialized view without join paths.", strings.Join(selectedList, ", ")),
+			SchemaID:       se.schemaDef.ID,
+			SchemaName:     se.schemaDef.Name,
+			ViewName:       "mv_denormalized_data",
+			RootTable:      rootTable,
+			Columns:        make([]MaterializedColumn, 0),
+			Joins:          make([]MaterializedJoin, 0),
+			SQL:            "",
+			SampleRows:     make([]map[string]any, 0),
+			NeededTables:   neededTables,
+			SelectedFields: selectedFields,
+			Stats: ViewStats{
+				CycleCount:     cyclesFired,
+				ElapsedMs:      float64(elapsed.Microseconds()) / 1000.0,
+				WMECount:       se.eng.WorkingMemory().Count(),
+				InferredTables: len(neededTables),
+				InferredJoins:  0,
+				ProjectedCols:  0,
+			},
+		}, nil
+	}
 
 	// Extract projected columns & compute unique aliases
 	colWMEs := se.eng.WorkingMemory().FindByClass("view_column")
@@ -460,19 +506,24 @@ func findSelectionIndex(selected [][2]string, table, col string) int {
 }
 
 // orderJoinsFromRoot sorts and orients joins so each joined table attaches to an already reached table.
-func orderJoinsFromRoot(root string, joins []MaterializedJoin) []MaterializedJoin {
+// It returns the ordered list of joins and the set of tables reached from root.
+func orderJoinsFromRoot(root string, joins []MaterializedJoin) ([]MaterializedJoin, map[string]bool) {
+	reached := make(map[string]bool)
+	if root != "" {
+		reached[root] = true
+	}
 	if len(joins) == 0 {
-		return make([]MaterializedJoin, 0)
+		return make([]MaterializedJoin, 0), reached
 	}
 
-	reached := map[string]bool{root: true}
 	ordered := make([]MaterializedJoin, 0, len(joins))
 	remaining := make([]MaterializedJoin, len(joins))
 	copy(remaining, joins)
 
 	for len(remaining) > 0 {
 		found := false
-		for i, jn := range remaining {
+		for i := 0; i < len(remaining); i++ {
+			jn := remaining[i]
 			if reached[jn.LeftTable] && !reached[jn.RightTable] {
 				reached[jn.RightTable] = true
 				ordered = append(ordered, jn)
@@ -492,15 +543,20 @@ func orderJoinsFromRoot(root string, joins []MaterializedJoin) []MaterializedJoi
 				remaining = append(remaining[:i], remaining[i+1:]...)
 				found = true
 				break
+			} else if reached[jn.LeftTable] && reached[jn.RightTable] {
+				// Redundant edge / cycle in join graph: both tables are already joined in the tree.
+				// Drop this join to avoid duplicate JOIN clauses in SQL.
+				remaining = append(remaining[:i], remaining[i+1:]...)
+				found = true
+				break
 			}
 		}
 		if !found {
-			// Disconnected or cyclic, append remaining
-			ordered = append(ordered, remaining...)
+			// No more joins connect to the reached set (remaining joins are disconnected).
 			break
 		}
 	}
-	return ordered
+	return ordered, reached
 }
 
 // buildMaterializedViewSQL synthesizes standard PostgreSQL / Oracle / Redshift CREATE MATERIALIZED VIEW statement.

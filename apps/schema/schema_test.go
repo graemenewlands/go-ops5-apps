@@ -284,3 +284,85 @@ func TestSchemaSwitch(t *testing.T) {
 		t.Fatalf("expected chinook, got %s", eng.SchemaDef().ID)
 	}
 }
+
+func TestDisconnectedTablesValidation(t *testing.T) {
+	eng, err := NewSchemaEngine("chinook")
+	if err != nil {
+		t.Fatalf("failed to create schema engine: %v", err)
+	}
+
+	// Case 1: Artist.ArtistId and Invoice.InvoiceId (disconnected in Chinook)
+	selected1 := [][2]string{
+		{"Artist", "ArtistId"},
+		{"Invoice", "InvoiceId"},
+	}
+	res1, err := eng.GenerateMaterializedView(selected1)
+	if err != nil {
+		t.Fatalf("GenerateMaterializedView returned unexpected error: %v", err)
+	}
+	if res1.Success {
+		t.Fatalf("expected generation to fail for disconnected tables Artist and Invoice, but got Success=true and SQL:\n%s", res1.SQL)
+	}
+	if res1.SQL != "" {
+		t.Fatalf("expected empty SQL for disconnected tables, got: %s", res1.SQL)
+	}
+	if !strings.Contains(res1.Error, "No connection between selected tables") {
+		t.Fatalf("expected error message to explain missing connection, got: %s", res1.Error)
+	}
+
+	// Case 2: Invoice.InvoiceId and Artist.ArtistId (reversed order)
+	eng.Clear()
+	selected2 := [][2]string{
+		{"Invoice", "InvoiceId"},
+		{"Artist", "ArtistId"},
+	}
+	res2, err := eng.GenerateMaterializedView(selected2)
+	if err != nil {
+		t.Fatalf("GenerateMaterializedView returned unexpected error: %v", err)
+	}
+	if res2.Success {
+		t.Fatalf("expected generation to fail for disconnected tables Invoice and Artist, but got Success=true and SQL:\n%s", res2.SQL)
+	}
+	if res2.SQL != "" {
+		t.Fatalf("expected empty SQL, got: %s", res2.SQL)
+	}
+
+	// Case 3: Partially connected tables: Artist and Album are connected, but Invoice is disconnected
+	eng.Clear()
+	selectedPart := [][2]string{
+		{"Artist", "ArtistId"},
+		{"Album", "Title"},
+		{"Invoice", "InvoiceId"},
+	}
+	resPart, err := eng.GenerateMaterializedView(selectedPart)
+	if err != nil {
+		t.Fatalf("GenerateMaterializedView returned unexpected error: %v", err)
+	}
+	if resPart.Success {
+		t.Fatalf("expected generation to fail when Invoice is disconnected from Artist/Album, but got Success=true and SQL:\n%s", resPart.SQL)
+	}
+	if resPart.SQL != "" {
+		t.Fatalf("expected empty SQL, got: %s", resPart.SQL)
+	}
+
+	// Case 4: Northwind disconnected table (Customers and Shippers)
+	err = eng.SwitchSchema("northwind")
+	if err != nil {
+		t.Fatalf("failed to switch to northwind: %v", err)
+	}
+	selectedNorthwind := [][2]string{
+		{"Customers", "CustomerID"},
+		{"Shippers", "ShipperID"},
+	}
+	resNW, err := eng.GenerateMaterializedView(selectedNorthwind)
+	if err != nil {
+		t.Fatalf("GenerateMaterializedView returned unexpected error: %v", err)
+	}
+	if resNW.Success {
+		t.Fatalf("expected generation to fail for disconnected Shippers and Customers, but got Success=true and SQL:\n%s", resNW.SQL)
+	}
+	if resNW.SQL != "" {
+		t.Fatalf("expected empty SQL, got: %s", resNW.SQL)
+	}
+}
+

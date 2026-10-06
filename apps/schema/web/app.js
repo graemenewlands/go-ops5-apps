@@ -35,6 +35,8 @@ const elements = {
   btnGenerateView: document.getElementById('btn-generate-view'),
   viewSection: document.getElementById('view-section'),
   viewEmptyState: document.getElementById('view-empty-state'),
+  viewErrorState: document.getElementById('view-error-state'),
+  viewErrorMessage: document.getElementById('view-error-message'),
   viewResultContent: document.getElementById('view-result-content'),
   statCycles: document.getElementById('stat-cycles'),
   statTime: document.getElementById('stat-time'),
@@ -503,10 +505,16 @@ function generateMaterializedView() {
 
   const res = window.schemaGenerateView(JSON.stringify(selectedArray));
   if (!res || !res.success) {
-    showToast("Error generating materialized view: " + (res ? res.error : "unknown error"));
+    const errorMsg = (res && res.error) ? res.error : "Failed to synthesize materialized view: tables are not connected";
+    showToast(errorMsg);
+    renderMaterializedViewError(errorMsg);
+    elements.viewSection.scrollIntoView({ behavior: 'smooth' });
     return;
   }
 
+  if (elements.viewErrorState) {
+    elements.viewErrorState.style.display = 'none';
+  }
   state.lastResult = res;
   renderMaterializedViewResult(res);
 
@@ -625,10 +633,25 @@ function renderSampleDataPreview(res) {
   });
 }
 
+function renderMaterializedViewError(errorMsg) {
+  state.lastResult = null;
+  elements.viewEmptyState.style.display = 'none';
+  elements.viewResultContent.style.display = 'none';
+  if (elements.viewErrorState) {
+    elements.viewErrorState.style.display = 'block';
+    if (elements.viewErrorMessage) {
+      elements.viewErrorMessage.innerText = errorMsg;
+    }
+  }
+}
+
 function resetMaterializedViewSection() {
   state.lastResult = null;
   elements.viewEmptyState.style.display = 'block';
   elements.viewResultContent.style.display = 'none';
+  if (elements.viewErrorState) {
+    elements.viewErrorState.style.display = 'none';
+  }
 
   // Fully reset all rendered fields
   elements.statCycles.innerText = '0';

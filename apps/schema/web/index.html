@@ -135,6 +135,14 @@
         <p>Select target fields on the E-R diagram above (or pick a preset query) and click <strong>"Done: Synthesize Materialized View"</strong> to run the OPS5 production rules.</p>
       </div>
 
+      <!-- Disconnected / Error state -->
+      <div id="view-error-state" class="view-empty-state view-error-state" style="display: none;">
+        <div class="empty-icon">⚠️</div>
+        <h3 id="view-error-title">Unable to Synthesize Materialized View</h3>
+        <p id="view-error-message" class="error-message"></p>
+        <div class="error-hint">To synthesize a valid view, selected tables must be connected by foreign key relations or intermediate bridge tables.</div>
+      </div>
+
       <!-- Result content -->
       <div id="view-result-content" class="view-result-content" style="display: none;">
         <!-- Metrics / Performance stats bar -->

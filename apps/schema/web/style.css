@@ -683,6 +683,30 @@ body {
   margin-bottom: 8px;
 }
 
+.view-error-state {
+  background-color: rgba(239, 68, 68, 0.06);
+  border: 1.5px dashed rgba(239, 68, 68, 0.45);
+}
+
+.view-error-state h3 {
+  color: #ef4444;
+}
+
+.view-error-state p {
+  color: var(--text-main);
+  max-width: 640px;
+  margin: 0 auto 12px auto;
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+.view-error-state .error-hint {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  max-width: 580px;
+  margin: 0 auto;
+}
+
 /* Metrics Grid */
 .metrics-grid {
   display: grid;
