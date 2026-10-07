@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Cassandra Protocol Dual-Ring Simulation — OPS5 WebAssembly</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+  <!-- Loading Overlay -->
+  <div id="loading-overlay" class="loading-overlay">
+    <div class="spinner"></div>
+    <div class="loading-text">Initializing Cassandra Ring Protocol Engine...</div>
+    <div class="loading-subtext">Compiling OPS5 forward-chaining rules in WebAssembly</div>
+  </div>
+
+  <!-- Header -->
+  <header class="app-header">
+    <div class="header-left">
+      <div class="logo-mark">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="9"></circle>
+          <path d="M12 3a9 9 0 0 0-9 9m18 0a9 9 0 0 0-9-9m0 18a9 9 0 0 0 9-9m-18 0a9 9 0 0 0 9 9"></path>
+          <circle cx="12" cy="12" r="3"></circle>
+        </svg>
+      </div>
+      <div>
+        <h1 class="app-title">Cassandra Protocol Simulator</h1>
+        <p class="app-subtitle">Dual-Ring Consistency & Quorum Rule Engine in WebAssembly</p>
+      </div>
+    </div>
+
+    <div class="header-badges">
+      <button id="btn-toggle-traffic" class="btn btn-secondary btn-sm traffic-toggle-btn">
+        <span class="traffic-beacon" id="traffic-beacon"></span>
+        <span id="traffic-btn-text">Start Auto-Traffic (~5s)</span>
+      </button>
+      <span class="badge badge-wasm">WebAssembly</span>
+      <span class="badge badge-go">Go 1.23</span>
+      <a href="https://pkg.go.dev/github.com/graemenewlands/ops5" target="_blank" rel="noopener" class="badge badge-link">ops5 v0.3.2 ↗</a>
+      <a href="https://github.com/graemenewlands/go-ops5-apps" target="_blank" rel="noopener" class="badge badge-link">Source ↗</a>
+      <button id="btn-toggle-rules" class="btn btn-secondary btn-sm">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>
+        <span>OPS5 Rules</span>
+      </button>
+      <button id="btn-reset-cluster" class="btn btn-secondary btn-sm">Reset Cluster</button>
+    </div>
+  </header>
+
+  <!-- Main Container -->
+  <main class="app-main">
+    <!-- Top Configuration & Query Bar -->
+    <section class="control-panel">
+      <!-- Client Connection -->
+      <div class="control-group">
+        <label class="control-label">Client Connection</label>
+        <div class="control-row">
+          <div class="btn-group" id="dc-toggle-group">
+            <button class="btn btn-segmented active" data-dc="dc1">DC1 (East)</button>
+            <button class="btn btn-segmented" data-dc="dc2">DC2 (West)</button>
+          </div>
+          <div class="coordinator-selector">
+            <span class="coordinator-label">Coordinator:</span>
+            <select id="select-coordinator" class="form-select">
+              <!-- Injected by JS -->
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <!-- Query Type -->
+      <div class="control-group">
+        <label class="control-label">Query Operation</label>
+        <div class="btn-group" id="query-type-group">
+          <button class="btn btn-segmented active" data-type="read">Read (SELECT)</button>
+          <button class="btn btn-segmented" data-type="write">Write (INSERT)</button>
+        </div>
+      </div>
+
+      <!-- Consistency Level Selector -->
+      <div class="control-group">
+        <label class="control-label">Consistency Level (CL)</label>
+        <div class="btn-group cl-group" id="cl-group">
+          <button class="btn btn-segmented cl-btn" data-cl="ONE" title="Requires 1 acknowledgment anywhere">ONE</button>
+          <button class="btn btn-segmented cl-btn" data-cl="TWO" title="Requires 2 acknowledgments anywhere">TWO</button>
+          <button class="btn btn-segmented cl-btn" data-cl="THREE" title="Requires 3 acknowledgments anywhere">THREE</button>
+          <button class="btn btn-segmented cl-btn active" data-cl="LOCAL_QUORUM" title="Requires quorum in local DC (2 of 3 replicas)">LOCAL_QUORUM</button>
+          <button class="btn btn-segmented cl-btn" data-cl="QUORUM" title="Requires quorum across both DCs (4 of 6 replicas)">QUORUM</button>
+        </div>
+      </div>
+
+      <!-- Auto-Traffic Status Indicator -->
+      <div class="control-group" id="traffic-status-container">
+        <label class="control-label">Dual-DC Generator</label>
+        <div class="traffic-status-badge" id="traffic-status-badge">
+          <span class="status-dot"></span>
+          <span id="traffic-status-text">Manual Mode</span>
+        </div>
+      </div>
+
+      <!-- Execute Button -->
+      <div class="control-group control-group-action">
+        <button id="btn-execute-query" class="btn btn-primary btn-execute">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+          <span>Execute Query</span>
+        </button>
+      </div>
+    </section>
+
+    <!-- Visualizer Stage: Dual-Ring Topology -->
+    <section class="topology-stage">
+      <div class="stage-header">
+        <div class="stage-legend">
+          <span class="legend-item"><span class="legend-dot dot-un"></span> Normal (UN)</span>
+          <span class="legend-item"><span class="legend-dot dot-uj"></span> Joining (UJ)</span>
+          <span class="legend-item"><span class="legend-dot dot-ds"></span> Stopped / Plug Pulled (DS)</span>
+          <span class="legend-item"><span class="legend-badge">REPLICA</span> Target Dataset Replica (50% ownership)</span>
+          <span class="legend-item"><span class="legend-badge badge-client">CLIENT</span> Your Client</span>
+          <span class="legend-item"><span class="legend-badge badge-coord">COORD</span> Coordinator</span>
+          <span class="legend-item"><span class="legend-badge badge-live">LIVE</span> Live Traffic</span>
+          <span class="legend-item" id="legend-wan-item" style="cursor:pointer;" title="Click to sever / reconnect WAN link">
+            <span class="legend-badge badge-wan" id="legend-wan-badge">⚡ WAN: CONNECTED</span>
+          </span>
+        </div>
+        <div class="stage-hint">
+          Click any node to inspect / pull plug &bull; <strong>Click center WAN Link to Sever / Reconnect</strong>
+        </div>
+      </div>
+
+      <div class="rings-wrapper">
+        <svg id="rings-svg" class="rings-svg" viewBox="0 0 1100 500" width="100%" height="500">
+          <defs>
+            <filter id="glow-coord" x="-50%" y="-50%" width="200%" height="200%">
+              <feGaussianBlur in="SourceGraphic" stdDeviation="4" result="blur" />
+              <feMerge>
+                <feMergeNode in="blur" />
+                <feMergeNode in="SourceGraphic" />
+              </feMerge>
+            </filter>
+            <filter id="glow-replica" x="-30%" y="-30%" width="160%" height="160%">
+              <feGaussianBlur in="SourceGraphic" stdDeviation="3" result="blur" />
+              <feMerge>
+                <feMergeNode in="blur" />
+                <feMergeNode in="SourceGraphic" />
+              </feMerge>
+            </filter>
+            <!-- Markers for packets -->
+            <marker id="arrow" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="#38bdf8" />
+            </marker>
+          </defs>
+
+          <!-- Inter-DC WAN Link Button (Click to Sever / Reconnect) -->
+          <g id="wan-link-layer" class="wan-btn-group" cursor="pointer" role="button" tabindex="0" aria-label="Toggle WAN Link">
+            <line id="wan-line-el" x1="310" y1="220" x2="790" y2="220" class="wan-line" />
+            <rect id="wan-pill-bg" x="460" y="198" width="180" height="44" rx="8" class="wan-pill-bg" />
+            <text id="wan-title-text" x="550" y="217" text-anchor="middle" class="wan-title-text">⚡ WAN Link</text>
+            <text id="wan-sub-text" x="550" y="232" text-anchor="middle" class="wan-sub-text">CONNECTED (Click to Sever)</text>
+          </g>
+
+          <!-- Dynamic Packet Flights Layer -->
+          <g id="packets-layer"></g>
+
+          <!-- Rings Layer (DC1 and DC2 circles) -->
+          <g id="rings-base-layer">
+            <!-- DC1 Ring -->
+            <circle cx="310" cy="220" r="150" class="ring-circle" />
+            <text x="310" y="215" text-anchor="middle" class="dc-title">Datacenter 1</text>
+            <text x="310" y="235" text-anchor="middle" class="dc-subtitle">East Ring (6 Nodes)</text>
+
+            <!-- DC2 Ring -->
+            <circle cx="790" cy="220" r="150" class="ring-circle" />
+            <text x="790" y="215" text-anchor="middle" class="dc-title">Datacenter 2</text>
+            <text x="790" y="235" text-anchor="middle" class="dc-subtitle">West Ring (6 Nodes)</text>
+          </g>
+
+          <!-- User Client Layer -->
+          <g id="client-layer"></g>
+
+          <!-- Nodes Layer (Injected by JS) -->
+          <g id="nodes-layer"></g>
+        </svg>
+      </div>
+    </section>
+
+    <!-- Query Execution & Protocol Diagnostics Console -->
+    <section class="results-console">
+      <div class="console-left">
+        <!-- Results Card -->
+        <div class="card result-card">
+          <div class="card-header">
+            <h3>Protocol Verification & Quorum Result</h3>
+            <div style="display:flex;gap:6px;align-items:center;">
+              <span id="result-source-badge" class="badge badge-subtle">No Queries Yet</span>
+              <span id="result-status-badge" class="badge badge-success">Ready</span>
+            </div>
+          </div>
+          <div class="metrics-grid">
+            <div class="metric-card">
+              <div class="metric-label">Consistency Level</div>
+              <div id="stat-cl" class="metric-value text-accent">LOCAL_QUORUM</div>
+            </div>
+            <div class="metric-card">
+              <div class="metric-label">Local Acks / Req</div>
+              <div id="stat-local-acks" class="metric-value">0 / 2</div>
+            </div>
+            <div class="metric-card">
+              <div class="metric-label">Total Acks / Req</div>
+              <div id="stat-total-acks" class="metric-value">0 / 2</div>
+            </div>
+            <div class="metric-card">
+              <div class="metric-label">Live Local Replicas</div>
+              <div id="stat-local-alive" class="metric-value">3 / 3</div>
+            </div>
+            <div class="metric-card">
+              <div class="metric-label">Live Total Replicas</div>
+              <div id="stat-total-alive" class="metric-value">6 / 6</div>
+            </div>
+            <div class="metric-card">
+              <div class="metric-label">OPS5 Rule Cycles</div>
+              <div id="stat-cycles" class="metric-value">0</div>
+            </div>
+          </div>
+
+          <!-- Quorum Evaluation Progress Bar -->
+          <div class="quorum-progress-wrapper">
+            <div class="progress-labels">
+              <span id="quorum-progress-text">Quorum Progress</span>
+              <span id="quorum-percent-text">0%</span>
+            </div>
+            <div class="progress-bar-bg">
+              <div id="quorum-progress-bar" class="progress-bar-fill"></div>
+            </div>
+          </div>
+
+          <!-- Hinted Handoffs & Read Repairs Banner -->
+          <div id="protocol-events-box" class="protocol-events-box">
+            <!-- Injected by JS -->
+          </div>
+        </div>
+      </div>
+
+      <!-- Protocol Trace & Terminal -->
+      <div class="console-right">
+        <div class="card terminal-card">
+          <div class="card-header">
+            <div class="terminal-title">
+              <span class="terminal-dot dot-red"></span>
+              <span class="terminal-dot dot-yellow"></span>
+              <span class="terminal-dot dot-green"></span>
+              <span>Cassandra Protocol Execution Trace</span>
+            </div>
+            <button id="btn-clear-terminal" class="btn btn-secondary btn-xs">Clear Trace</button>
+          </div>
+          <div id="terminal-body" class="terminal-body">
+            <div class="log-line text-muted">// Connected to Cassandra Dual-Ring Protocol Engine in WebAssembly</div>
+            <div class="log-line text-muted">// Cluster: 2 Datacenters, 6 nodes per ring, 50% dataset distribution (3 replicas per DC)</div>
+            <div class="log-line text-info">Ready for query execution or node fault injection.</div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Slide-out Rule Inspector Drawer -->
+  <aside id="rule-drawer" class="rule-drawer">
+    <div class="rule-drawer-header">
+      <h2>OPS5 Production Rules (cassandra.ops)</h2>
+      <button id="btn-close-drawer" class="btn btn-icon">&times;</button>
+    </div>
+    <div class="rule-drawer-content">
+      <p class="drawer-description">
+        Declarative OPS5 forward-chaining rules executing in WebAssembly. Evaluates natural endpoints, pre-flight availability, parallel dispatch, message delivery, acknowledgment accumulation, consistency guarantees, hinted handoffs, and read repairs.
+      </p>
+      <pre><code id="rule-code-block" class="language-ops5">Loading rules...</code></pre>
+    </div>
+  </aside>
+  <div id="drawer-backdrop" class="drawer-backdrop"></div>
+
+  <!-- Toast notification -->
+  <div id="toast" class="toast"></div>
+
+  <!-- Node Modal for detailed inspection -->
+  <div id="node-modal" class="modal-backdrop">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3 id="modal-node-title">Node dc1-n1</h3>
+        <button id="btn-close-modal" class="btn btn-icon">&times;</button>
+      </div>
+      <div class="modal-body" id="modal-node-body">
+        <!-- Injected by JS -->
+      </div>
+    </div>
+  </div>
+
+  <!-- Scripts -->
+  <script src="wasm_exec.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,402 @@
+;; ==============================================================================
+;; Apache Cassandra Dual-Ring Protocol Simulation in OPS5 Production Rules
+;;
+;; Models two 6-node Cassandra datacenter rings (DC1 East, DC2 West).
+;; Simulates node health (U/D) and lifecycle membership (S/J/N).
+;; Evaluates query dispatch, coordinator routing, message delivery,
+;; replica acknowledgments, hinted handoffs, and Consistency Levels:
+;;   - ONE, TWO, THREE, LOCAL_QUORUM, QUORUM
+;; ==============================================================================
+
+;; ------------------------------------------------------------------------------
+;; Class Declarations (literalize)
+;; ------------------------------------------------------------------------------
+(literalize cluster_meta total_replicas local_replicas wan_connected)
+(literalize node id dc ring_pos health membership is_replica value timestamp)
+(literalize client_connection dc coordinator_id)
+(literalize query id type key cl write_val write_ts phase coordinator local_dc status error_reason)
+(literalize live_tally query_id local_alive remote_alive total_alive)
+(literalize message query_id kind from_node to_node is_local status payload_val payload_ts)
+(literalize ack_accumulator query_id local_acks remote_acks total_acks highest_ts resolved_val)
+(literalize hinted_handoff query_id coordinator target_node value timestamp)
+(literalize read_repair query_id target_node repaired_val repaired_ts)
+
+;; ------------------------------------------------------------------------------
+;; Stage 0: INITIALIZE QUERY & TALLY LIVE REPLICAS
+;; When a query is created in phase "init", initialize the tally and accumulator.
+;; ------------------------------------------------------------------------------
+(p init-query-state [salience 100]
+    <q> (query ^id <qid> ^phase init)
+    -(live_tally ^query_id <qid>)
+  -->
+    (make live_tally ^query_id <qid> ^local_alive 0 ^remote_alive 0 ^total_alive 0)
+    (make ack_accumulator ^query_id <qid> ^local_acks 0 ^remote_acks 0 ^total_acks 0 ^highest_ts 0 ^resolved_val none)
+    (modify <q> ^phase tally-local-replicas)
+)
+
+;; Tally operational replicas in the coordinator's local DC
+(p tally-local-operational-replica [salience 80]
+    (query ^id <qid> ^local_dc <ldc> ^phase tally-local-replicas)
+    (node ^id <nid> ^dc <ldc> ^health U ^membership N ^is_replica 1)
+    <tally> (live_tally ^query_id <qid> ^local_alive <loc> ^total_alive <tot>)
+    -(message ^to_node <nid> ^query_id <qid> ^kind counted_local)
+  -->
+    (bind <nloc> (compute <loc> + 1))
+    (bind <ntot> (compute <tot> + 1))
+    (make message ^query_id <qid> ^kind counted_local ^from_node coordinator ^to_node <nid> ^is_local 1 ^status delivered ^payload_val none ^payload_ts 0)
+    (modify <tally> ^local_alive <nloc> ^total_alive <ntot>)
+)
+
+;; Also count joining nodes for write tolerance tally
+(p tally-local-joining-replica [salience 75]
+    (query ^id <qid> ^type write ^local_dc <ldc> ^phase tally-local-replicas)
+    (node ^id <nid> ^dc <ldc> ^health U ^membership J ^is_replica 1)
+    <tally> (live_tally ^query_id <qid> ^local_alive <loc> ^total_alive <tot>)
+    -(message ^to_node <nid> ^query_id <qid> ^kind counted_local)
+  -->
+    (bind <nloc> (compute <loc> + 1))
+    (bind <ntot> (compute <tot> + 1))
+    (make message ^query_id <qid> ^kind counted_local ^from_node coordinator ^to_node <nid> ^is_local 1 ^status delivered ^payload_val none ^payload_ts 0)
+    (modify <tally> ^local_alive <nloc> ^total_alive <ntot>)
+)
+
+(p transition-tally-to-remote [salience 60]
+    <q> (query ^id <qid> ^phase tally-local-replicas)
+  -->
+    (modify <q> ^phase tally-remote-replicas)
+)
+
+;; Tally operational replicas in the remote DC (only reachable if WAN link is connected)
+(p tally-remote-operational-replica [salience 80]
+    (cluster_meta ^wan_connected 1)
+    (query ^id <qid> ^local_dc <ldc> ^phase tally-remote-replicas)
+    (node ^id <nid> ^dc { <> <ldc> } ^health U ^membership N ^is_replica 1)
+    <tally> (live_tally ^query_id <qid> ^remote_alive <rem> ^total_alive <tot>)
+    -(message ^to_node <nid> ^query_id <qid> ^kind counted_remote)
+  -->
+    (bind <nrem> (compute <rem> + 1))
+    (bind <ntot> (compute <tot> + 1))
+    (make message ^query_id <qid> ^kind counted_remote ^from_node coordinator ^to_node <nid> ^is_local 0 ^status delivered ^payload_val none ^payload_ts 0)
+    (modify <tally> ^remote_alive <nrem> ^total_alive <ntot>)
+)
+
+(p tally-remote-joining-replica [salience 75]
+    (cluster_meta ^wan_connected 1)
+    (query ^id <qid> ^type write ^local_dc <ldc> ^phase tally-remote-replicas)
+    (node ^id <nid> ^dc { <> <ldc> } ^health U ^membership J ^is_replica 1)
+    <tally> (live_tally ^query_id <qid> ^remote_alive <rem> ^total_alive <tot>)
+    -(message ^to_node <nid> ^query_id <qid> ^kind counted_remote)
+  -->
+    (bind <nrem> (compute <rem> + 1))
+    (bind <ntot> (compute <tot> + 1))
+    (make message ^query_id <qid> ^kind counted_remote ^from_node coordinator ^to_node <nid> ^is_local 0 ^status delivered ^payload_val none ^payload_ts 0)
+    (modify <tally> ^remote_alive <nrem> ^total_alive <ntot>)
+)
+
+(p transition-tally-to-verify [salience 60]
+    <q> (query ^id <qid> ^phase tally-remote-replicas)
+  -->
+    (modify <q> ^phase verify-availability)
+)
+
+;; ------------------------------------------------------------------------------
+;; Stage 1: VERIFY AVAILABILITY (Pre-flight Fast Fail)
+;; Checks whether enough replicas are alive to satisfy the Consistency Level.
+;; ------------------------------------------------------------------------------
+
+;; Coordinator down or stopped fast-fail
+(p fail-coordinator-down [salience 95]
+    <q> (query ^id <qid> ^coordinator <cid> ^phase verify-availability)
+    (node ^id <cid> ^health D)
+  -->
+    (modify <q> ^phase complete ^status failed ^error_reason "NoHostAvailableException: Coordinator node is down")
+)
+
+(p fail-coordinator-stopped [salience 94]
+    <q> (query ^id <qid> ^coordinator <cid> ^phase verify-availability)
+    (node ^id <cid> ^membership S)
+  -->
+    (modify <q> ^phase complete ^status failed ^error_reason "NoHostAvailableException: Coordinator node is stopped")
+)
+
+;; Fast fail LOCAL_QUORUM: requires at least 2 alive replicas in local DC (out of 3)
+(p fail-unavailable-local-quorum [salience 90]
+    <q> (query ^id <qid> ^cl LOCAL_QUORUM ^phase verify-availability)
+    (live_tally ^query_id <qid> ^local_alive { < 2 })
+  -->
+    (modify <q> ^phase complete ^status failed ^error_reason "UnavailableException: Cannot achieve LOCAL_QUORUM (requires 2 live local replicas)")
+)
+
+;; Fast fail QUORUM: requires at least 4 alive replicas across cluster (out of 6)
+(p fail-unavailable-quorum [salience 90]
+    <q> (query ^id <qid> ^cl QUORUM ^phase verify-availability)
+    (live_tally ^query_id <qid> ^total_alive { < 4 })
+  -->
+    (modify <q> ^phase complete ^status failed ^error_reason "UnavailableException: Cannot achieve QUORUM (requires 4 live replicas across cluster)")
+)
+
+;; Fast fail THREE: requires at least 3 alive replicas
+(p fail-unavailable-three [salience 90]
+    <q> (query ^id <qid> ^cl THREE ^phase verify-availability)
+    (live_tally ^query_id <qid> ^total_alive { < 3 })
+  -->
+    (modify <q> ^phase complete ^status failed ^error_reason "UnavailableException: Cannot achieve THREE (requires 3 live replicas)")
+)
+
+;; Fast fail TWO: requires at least 2 alive replicas
+(p fail-unavailable-two [salience 90]
+    <q> (query ^id <qid> ^cl TWO ^phase verify-availability)
+    (live_tally ^query_id <qid> ^total_alive { < 2 })
+  -->
+    (modify <q> ^phase complete ^status failed ^error_reason "UnavailableException: Cannot achieve TWO (requires 2 live replicas)")
+)
+
+;; Fast fail ONE: requires at least 1 alive replica
+(p fail-unavailable-one [salience 90]
+    <q> (query ^id <qid> ^cl ONE ^phase verify-availability)
+    (live_tally ^query_id <qid> ^total_alive { < 1 })
+  -->
+    (modify <q> ^phase complete ^status failed ^error_reason "UnavailableException: Cannot achieve ONE (requires 1 live replica)")
+)
+
+;; If availability check passes, move to dispatch
+(p transition-verify-to-dispatch [salience 50]
+    <q> (query ^id <qid> ^phase verify-availability)
+  -->
+    (modify <q> ^phase dispatch-requests)
+)
+
+;; ------------------------------------------------------------------------------
+;; Stage 2: DISPATCH REQUESTS TO REPLICAS
+;; Coordinator emits network requests to all natural replica nodes.
+;; ------------------------------------------------------------------------------
+
+;; Dispatch to Local Replica
+(p dispatch-to-local-replica [salience 80]
+    (query ^id <qid> ^coordinator <coord> ^local_dc <ldc> ^phase dispatch-requests)
+    (node ^id <nid> ^dc <ldc> ^is_replica 1)
+    -(message ^query_id <qid> ^to_node <nid> ^kind request)
+  -->
+    (make message ^query_id <qid> ^kind request ^from_node <coord> ^to_node <nid> ^is_local 1 ^status in_flight ^payload_val none ^payload_ts 0)
+)
+
+;; Dispatch to Remote Replica (cross-DC) when WAN link is connected
+(p dispatch-to-remote-replica [salience 80]
+    (cluster_meta ^wan_connected 1)
+    (query ^id <qid> ^coordinator <coord> ^local_dc <ldc> ^phase dispatch-requests)
+    (node ^id <nid> ^dc { <> <ldc> } ^is_replica 1)
+    -(message ^query_id <qid> ^to_node <nid> ^kind request)
+  -->
+    (make message ^query_id <qid> ^kind request ^from_node <coord> ^to_node <nid> ^is_local 0 ^status in_flight ^payload_val none ^payload_ts 0)
+)
+
+;; Dispatch to Remote Replica dropped at WAN boundary when WAN link is severed
+(p dispatch-to-remote-replica-severed [salience 82]
+    (cluster_meta ^wan_connected 0)
+    (query ^id <qid> ^coordinator <coord> ^local_dc <ldc> ^phase dispatch-requests)
+    (node ^id <nid> ^dc { <> <ldc> } ^is_replica 1)
+    -(message ^query_id <qid> ^to_node <nid> ^kind request)
+  -->
+    (make message ^query_id <qid> ^kind request ^from_node <coord> ^to_node <nid> ^is_local 0 ^status dropped ^payload_val none ^payload_ts 0)
+)
+
+(p transition-dispatch-to-deliver [salience 40]
+    <q> (query ^id <qid> ^phase dispatch-requests)
+  -->
+    (modify <q> ^phase deliver-requests)
+)
+
+;; ------------------------------------------------------------------------------
+;; Stage 3: DELIVER REQUESTS & EMIT REPLICA RESPONSES
+;; Operational replicas reply with current value and timestamp.
+;; Down/stopped replicas drop request. Writes to down replicas generate hinted handoff.
+;; ------------------------------------------------------------------------------
+
+;; Operational replica (UN) answers successfully
+(p deliver-to-up-normal-replica [salience 80]
+    (query ^id <qid> ^phase deliver-requests)
+    <m> (message ^query_id <qid> ^kind request ^to_node <nid> ^status in_flight ^is_local <isloc>)
+    (node ^id <nid> ^health U ^membership N ^value <val> ^timestamp <ts>)
+    -(message ^query_id <qid> ^kind response ^from_node <nid>)
+  -->
+    (modify <m> ^status delivered)
+    (make message ^query_id <qid> ^kind response ^from_node <nid> ^to_node coordinator ^is_local <isloc> ^status delivered ^payload_val <val> ^payload_ts <ts>)
+)
+
+;; Joining replica (UJ) on Write query accepts write
+(p deliver-write-to-joining-replica [salience 80]
+    (query ^id <qid> ^type write ^phase deliver-requests)
+    <m> (message ^query_id <qid> ^kind request ^to_node <nid> ^status in_flight ^is_local <isloc>)
+    (node ^id <nid> ^health U ^membership J ^value <val> ^timestamp <ts>)
+    -(message ^query_id <qid> ^kind response ^from_node <nid>)
+  -->
+    (modify <m> ^status delivered)
+    (make message ^query_id <qid> ^kind response ^from_node <nid> ^to_node coordinator ^is_local <isloc> ^status delivered ^payload_val <val> ^payload_ts <ts>)
+)
+
+;; Joining replica (UJ) on Read query is ignored for read consistency
+(p deliver-read-to-joining-replica [salience 78]
+    (query ^id <qid> ^type read ^phase deliver-requests)
+    <m> (message ^query_id <qid> ^kind request ^to_node <nid> ^status in_flight)
+    (node ^id <nid> ^health U ^membership J)
+  -->
+    (modify <m> ^status dropped)
+)
+
+;; Down/stopped replica drops request
+(p deliver-to-down-replica [salience 70]
+    (query ^id <qid> ^phase deliver-requests)
+    <m> (message ^query_id <qid> ^kind request ^to_node <nid> ^status in_flight)
+    (node ^id <nid> ^health D)
+  -->
+    (modify <m> ^status dropped)
+)
+
+;; Write to down replica generates hinted handoff on coordinator
+(p record-hint-for-down-replica [salience 75]
+    (query ^id <qid> ^type write ^coordinator <coord> ^write_val <wval> ^write_ts <wts> ^phase deliver-requests)
+    (message ^query_id <qid> ^kind request ^to_node <nid> ^status dropped)
+    (node ^id <nid> ^health D ^is_replica 1)
+    -(hinted_handoff ^query_id <qid> ^target_node <nid>)
+  -->
+    (make hinted_handoff ^query_id <qid> ^coordinator <coord> ^target_node <nid> ^value <wval> ^timestamp <wts>)
+)
+
+;; Write to severed remote replica generates hinted handoff on coordinator
+(p record-hint-for-severed-remote-replica [salience 74]
+    (cluster_meta ^wan_connected 0)
+    (query ^id <qid> ^type write ^coordinator <coord> ^local_dc <ldc> ^write_val <wval> ^write_ts <wts> ^phase deliver-requests)
+    (message ^query_id <qid> ^kind request ^to_node <nid> ^status dropped ^is_local 0)
+    (node ^id <nid> ^dc { <> <ldc> } ^is_replica 1)
+    -(hinted_handoff ^query_id <qid> ^target_node <nid>)
+  -->
+    (make hinted_handoff ^query_id <qid> ^coordinator <coord> ^target_node <nid> ^value <wval> ^timestamp <wts>)
+)
+
+(p transition-deliver-to-accumulate [salience 30]
+    <q> (query ^id <qid> ^phase deliver-requests)
+  -->
+    (modify <q> ^phase accumulate-acks)
+)
+
+;; ------------------------------------------------------------------------------
+;; Stage 4: ACCUMULATE ACKNOWLEDGMENTS
+;; Tally local and total acks; resolve highest timestamp value for reads.
+;; ------------------------------------------------------------------------------
+
+(p accumulate-local-ack [salience 80]
+    (query ^id <qid> ^phase accumulate-acks)
+    <m> (message ^query_id <qid> ^kind response ^from_node <from> ^is_local 1 ^status delivered ^payload_val <val> ^payload_ts <ts>)
+    <acc> (ack_accumulator ^query_id <qid> ^local_acks <locks> ^total_acks <totacks> ^highest_ts <hits> ^resolved_val <rval>)
+    -(message ^to_node <from> ^query_id <qid> ^kind counted_ack)
+  -->
+    (bind <nlocks> (compute <locks> + 1))
+    (bind <ntotacks> (compute <totacks> + 1))
+    (make message ^query_id <qid> ^kind counted_ack ^from_node coordinator ^to_node <from> ^is_local 1 ^status delivered ^payload_val none ^payload_ts 0)
+    (modify <acc> ^local_acks <nlocks> ^total_acks <ntotacks>)
+)
+
+(p accumulate-remote-ack [salience 80]
+    (query ^id <qid> ^phase accumulate-acks)
+    <m> (message ^query_id <qid> ^kind response ^from_node <from> ^is_local 0 ^status delivered ^payload_val <val> ^payload_ts <ts>)
+    <acc> (ack_accumulator ^query_id <qid> ^remote_acks <remacks> ^total_acks <totacks> ^highest_ts <hits> ^resolved_val <rval>)
+    -(message ^to_node <from> ^query_id <qid> ^kind counted_ack)
+  -->
+    (bind <nremacks> (compute <remacks> + 1))
+    (bind <ntotacks> (compute <totacks> + 1))
+    (make message ^query_id <qid> ^kind counted_ack ^from_node coordinator ^to_node <from> ^is_local 0 ^status delivered ^payload_val none ^payload_ts 0)
+    (modify <acc> ^remote_acks <nremacks> ^total_acks <ntotacks>)
+)
+
+;; Update highest timestamp for reads if newer response received
+(p resolve-newer-read-timestamp [salience 85]
+    (query ^id <qid> ^type read ^phase accumulate-acks)
+    (message ^query_id <qid> ^kind response ^status delivered ^payload_val <val> ^payload_ts <ts>)
+    <acc> (ack_accumulator ^query_id <qid> ^highest_ts { < <ts> })
+  -->
+    (modify <acc> ^highest_ts <ts> ^resolved_val <val>)
+)
+
+(p transition-accumulate-to-evaluate [salience 40]
+    <q> (query ^id <qid> ^phase accumulate-acks)
+  -->
+    (modify <q> ^phase evaluate-consistency)
+)
+
+;; ------------------------------------------------------------------------------
+;; Stage 5: EVALUATE CONSISTENCY LEVEL
+;; Verify whether accumulated acknowledgments satisfy the consistency guarantee.
+;; ------------------------------------------------------------------------------
+
+;; LOCAL_QUORUM: needs >= 2 acks from local DC
+(p eval-local-quorum-satisfied [salience 90]
+    <q> (query ^id <qid> ^cl LOCAL_QUORUM ^phase evaluate-consistency)
+    (ack_accumulator ^query_id <qid> ^local_acks { >= 2 })
+  -->
+    (modify <q> ^phase check-repair ^status success)
+)
+
+;; QUORUM: needs >= 4 total acks across both DCs
+(p eval-quorum-satisfied [salience 90]
+    <q> (query ^id <qid> ^cl QUORUM ^phase evaluate-consistency)
+    (ack_accumulator ^query_id <qid> ^total_acks { >= 4 })
+  -->
+    (modify <q> ^phase check-repair ^status success)
+)
+
+;; THREE: needs >= 3 total acks
+(p eval-three-satisfied [salience 90]
+    <q> (query ^id <qid> ^cl THREE ^phase evaluate-consistency)
+    (ack_accumulator ^query_id <qid> ^total_acks { >= 3 })
+  -->
+    (modify <q> ^phase check-repair ^status success)
+)
+
+;; TWO: needs >= 2 total acks
+(p eval-two-satisfied [salience 90]
+    <q> (query ^id <qid> ^cl TWO ^phase evaluate-consistency)
+    (ack_accumulator ^query_id <qid> ^total_acks { >= 2 })
+  -->
+    (modify <q> ^phase check-repair ^status success)
+)
+
+;; ONE: needs >= 1 total ack
+(p eval-one-satisfied [salience 90]
+    <q> (query ^id <qid> ^cl ONE ^phase evaluate-consistency)
+    (ack_accumulator ^query_id <qid> ^total_acks { >= 1 })
+  -->
+    (modify <q> ^phase check-repair ^status success)
+)
+
+;; Fallback failure: Consistency level threshold not met
+(p eval-consistency-failed-write [salience 50]
+    <q> (query ^id <qid> ^type write ^phase evaluate-consistency ^status pending)
+  -->
+    (modify <q> ^phase complete ^status failed ^error_reason "WriteTimeoutException: Acknowledgment count below consistency level threshold")
+)
+
+(p eval-consistency-failed-read [salience 50]
+    <q> (query ^id <qid> ^type read ^phase evaluate-consistency ^status pending)
+  -->
+    (modify <q> ^phase complete ^status failed ^error_reason "ReadTimeoutException: Replica response count below consistency level threshold")
+)
+
+;; ------------------------------------------------------------------------------
+;; Stage 6: CHECK READ REPAIR & COMPLETE
+;; If read succeeded with newer data, flag older operational replicas for repair.
+;; ------------------------------------------------------------------------------
+(p detect-read-repair [salience 80]
+    (query ^id <qid> ^type read ^phase check-repair ^status success)
+    (ack_accumulator ^query_id <qid> ^highest_ts <hits> ^resolved_val <rval>)
+    (message ^query_id <qid> ^kind response ^from_node <nid> ^payload_ts { < <hits> })
+    (node ^id <nid> ^health U ^membership N)
+    -(read_repair ^query_id <qid> ^target_node <nid>)
+  -->
+    (make read_repair ^query_id <qid> ^target_node <nid> ^repaired_val <rval> ^repaired_ts <hits>)
+)
+
+(p finish-query [salience 20]
+    <q> (query ^id <qid> ^phase check-repair)
+  -->
+    (modify <q> ^phase complete)
+)

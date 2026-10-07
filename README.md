@@ -13,6 +13,7 @@ This repository demonstrates how classic forward-chaining production rules, conf
 
 | Application | Domain | Technologies | Status |
 | :--- | :--- | :--- | :--- |
+| [**Cassandra Protocol Dual-Ring Simulator**](#3-cassandra-protocol-dual-ring-simulator-webassembly) | Distributed Systems & Consensus | WebAssembly, Dual-Ring SVG, OPS5 Rete | **Live** |
 | [**Conway's Game of Life**](#1-conways-game-of-life-webassembly) | Cellular Automata & Simulation | WebAssembly, HTML5 Canvas, OPS5 Rete | **Live** |
 | [**Schema & Materialized View Synthesizer**](#2-schema--materialized-view-synthesizer-webassembly) | Database Modeling & View Synthesis | WebAssembly, Interactive E-R Diagram, OPS5 Rules | **Live** |
 | **E-Commerce & Fraud Detection** | Business Rules Engine & CEP | Go 1.23, Custom Actions, Dynamic Rules | *Planned* |
@@ -164,6 +165,58 @@ Verifies pattern oscillations for Game of Life and multi-table join tree resolut
 
 ---
 
+## 3. Cassandra Protocol Dual-Ring Simulator (WebAssembly)
+
+An interactive, browser-based simulation of Apache Cassandra's distributed ring protocol across two 6-node datacenters with 50% dataset distribution (3 replicas per DC, 6 total replicas).
+
+```mermaid
+flowchart TD
+    Client["Client Request\n(Read or Write, Consistency Level)"] --> Coord["Coordinator Node\n(in connected Datacenter)"]
+    Coord --> Avail{"Pre-flight Availability Check\n(Live Replicas >= CL threshold?)"}
+    Avail -- "Insufficient Live Replicas" --> Fail["Fast Fail:\nUnavailableException"]
+    Avail -- "Sufficient Live Replicas" --> Dispatch["Parallel Request Dispatch\n(To 6 Natural Token Endpoints)"]
+    Dispatch --> NodeResp["Replicas Process Requests\n(UN: Responds, UJ: Joining, DS: Dropped)"]
+    NodeResp -- "Write to Down Replica" --> Hint["Coordinator Saves\nHinted Handoff"]
+    NodeResp --> Acks["Coordinator Accumulates Acknowledgment WMEs\n(Local Acks vs Remote Acks)"]
+    Acks --> Eval{"Evaluate Consistency Guarantee"}
+    Eval -- "Threshold Met" --> Success["Query SUCCESS\n(Read repair checked on outdated replicas)"]
+    Eval -- "Threshold Not Met" --> Timeout["Query TIMEOUT\n(WriteTimeoutException / ReadTimeoutException)"]
+```
+
+### Key Architectural Highlights
+
+1. **Dual-Ring Topology**:
+   - Two 6-node rings: Datacenter 1 (East) and Datacenter 2 (West), connected via inter-DC trunk.
+   - 50% dataset distribution: Nodes 1, 2, and 3 in each DC own the token range for the queried dataset (6 natural replicas total).
+2. **Node Lifecycle & Health States**:
+   - Evaluates combinations of Health (`U` = Up, `D` = Down) and Membership (`S` = Stopped, `J` = Joining, `N` = Normal).
+   - Valid lifecycle progression: `DS` &rarr; `UJ` &rarr; `UN`.
+   - `DJ` is strictly rejected as an invalid state enum.
+3. **Consistency Level Evaluations**:
+   - `ONE`: 1 acknowledgment anywhere in cluster.
+   - `TWO`: 2 acknowledgments anywhere in cluster.
+   - `THREE`: 3 acknowledgments anywhere in cluster.
+   - `LOCAL_QUORUM`: $\lfloor 3/2 \rfloor + 1 = 2$ acknowledgments in the coordinator's local DC.
+   - `QUORUM`: $\lfloor 6/2 \rfloor + 1 = 4$ acknowledgments across the entire cluster.
+4. **Fault Injection & Protocol Behavior**:
+   - Pulling the plug on a node transitions it to `DS`.
+   - Pre-flight availability check fast-fails with `UnavailableException` if alive replicas cannot satisfy the requested CL before network dispatch.
+   - Writes to offline replicas trigger coordinator **Hinted Handoff** WMEs.
+   - Reads evaluate Lamport/write timestamps and flag lagging operational replicas for background **Read Repair**.
+5. **Dual-Datacenter Automated Traffic Generator**:
+   - Simulates real-world background Cassandra cluster traffic by alternating queries across DC1 (East) and DC2 (West).
+   - Randomly issues `READ` and `WRITE` queries across all Consistency Levels (`ONE`, `TWO`, `THREE`, `LOCAL_QUORUM`, `QUORUM`).
+   - Query arrival rate is governed by a **normal (Gaussian) distribution** ($\mu = 5.0\text{s}, \sigma = 1.2\text{s}$) generated via the Box-Muller transform.
+   - Dynamic visual feedback displays countdown timers, active coordinators, animated packet flights, and terminal audit logs.
+
+#### Launch Local Server:
+```bash
+make serve-cassandra
+```
+Open your browser to: **[http://localhost:8082](http://localhost:8082)**
+
+---
+
 ### Repository Structure
 
 ```
@@ -174,6 +227,14 @@ go-ops5-apps/
 ├── go.sum                     # Go module checksums
 ├── .gitignore                 # Standard Go ignore patterns
 └── apps/
+    ├── cassandra/             # Cassandra Protocol Dual-Ring Consistency Simulator
+    │   ├── rules/cassandra.ops # Declarative protocol rules (dispatch, quorum, hints, repair)
+    │   ├── data/              # Cluster and datacenter ring topology model
+    │   ├── engine.go          # Go CassandraEngine managing WMEs and queries
+    │   ├── cassandra_test.go  # Consistency level and fault injection unit tests
+    │   ├── wasm/main.go       # WebAssembly syscall/js entrypoint
+    │   ├── server/main.go     # Local HTTP development server (port 8082)
+    │   └── web/               # Dual-ring SVG UI, packet animator, and wasm artifacts
     ├── life/                  # Conway's Game of Life in OPS5
     │   ├── rules/life.ops     # 5-stage declarative cellular automaton rules
     │   ├── engine.go          # Go LifeEngine wrapper

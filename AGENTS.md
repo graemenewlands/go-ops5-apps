@@ -10,11 +10,19 @@
 
 ```
 go-ops5-apps/
-├── Makefile                   # Build automation (test, build-wasm, serve-life, serve-schema)
+├── Makefile                   # Build automation (test, build-wasm, serve-life, serve-schema, serve-cassandra)
 ├── README.md                  # Showcase documentation and architecture diagrams
 ├── go.mod                     # Go module definition (requires github.com/graemenewlands/ops5)
 ├── go.sum                     # Checksums
 └── apps/
+    ├── cassandra/             # Cassandra Protocol Dual-Ring Consistency Simulator
+    │   ├── rules/cassandra.ops # Declarative protocol rules (dispatch, quorum, hints, repair)
+    │   ├── data/              # Cluster and datacenter ring topology model
+    │   ├── engine.go          # Go CassandraEngine managing WMEs and queries
+    │   ├── cassandra_test.go  # Consistency level and fault injection unit tests
+    │   ├── wasm/main.go       # WebAssembly syscall/js entrypoint
+    │   ├── server/main.go     # Local HTTP development server (port 8082)
+    │   └── web/               # Dual-ring SVG UI, packet animator, and wasm artifacts
     ├── life/                  # Conway's Game of Life in OPS5
     │   ├── rules/life.ops     # 5-stage declarative cellular automaton rules
     │   ├── engine.go          # Go LifeEngine wrapper
@@ -36,12 +44,19 @@ go-ops5-apps/
 
 ## 2. Applications
 
-1. **Conway's Game of Life (`apps/life`)**:
+1. **Cassandra Protocol Simulator (`apps/cassandra`)**:
+   - Simulates Apache Cassandra's distributed ring protocol across two 6-node datacenters with 50% dataset distribution (3 replicas per DC).
+   - Models node lifecycle and health: `UN` (Up Normal), `UJ` (Up Joining), `DS` (Down Stopped / plug pulled), and `DN` (Down Normal). `DJ` is disallowed.
+   - Declarative OPS5 rules evaluate consistency levels: `ONE`, `TWO`, `THREE`, `LOCAL_QUORUM`, and `QUORUM`.
+   - Simulates coordinator dispatch, packet delivery, hinted handoffs for down replicas, and read-repair detection.
+   - Compiled to `apps/cassandra/web/main.wasm`.
+
+2. **Conway's Game of Life (`apps/life`)**:
    - Computes every generation purely via forward-chaining OPS5 production rules without imperative loops.
    - Lifecycle: `emit` ➔ `tally` ➔ `evaluate` ➔ `clear-cells` & `promote` ➔ `ready` (quiescence).
    - Compiled to `apps/life/web/main.wasm`.
 
-2. **Schema & Materialized View Synthesizer (`apps/schema`)**:
+3. **Schema & Materialized View Synthesizer (`apps/schema`)**:
    - Represents tables, columns, foreign keys (1-N / N-1), and Many-to-Many associations as WMEs.
    - Joins and path discovery are modeled directly as production rules matching needed tables and relations.
    - Synthesizes formatted `CREATE MATERIALIZED VIEW` SQL statements with automatic column alias conflict resolution and in-memory sample data joins.
@@ -71,10 +86,11 @@ make test
 ```
 
 ### Building WebAssembly Artifacts
-Rebuild both Wasm binaries and sync `wasm_exec.js` from `$GOROOT`:
+Rebuild all Wasm binaries and sync `wasm_exec.js` from `$GOROOT`:
 ```bash
 make build-wasm
 # Or individually:
+make build-wasm-cassandra
 make build-wasm-life
 make build-wasm-schema
 ```
@@ -82,6 +98,10 @@ make build-wasm-schema
 ### Local Development Servers
 To test applications locally in the browser:
 ```bash
+# Cassandra Protocol Simulator (port 8082)
+make serve-cassandra
+# Open http://localhost:8082
+
 # Schema & Materialized View Synthesizer (port 8081)
 make serve-schema
 # Open http://localhost:8081
