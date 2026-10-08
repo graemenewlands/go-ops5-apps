@@ -192,15 +192,16 @@ window.onOps5CassandraReady = () => {
 
 async function initWasm() {
   const go = new Go();
+  const wasmUrl = `main.wasm?v=${Date.now()}`;
   try {
     let result;
     if (WebAssembly.instantiateStreaming) {
       result = await WebAssembly.instantiateStreaming(
-        fetch('main.wasm'),
+        fetch(wasmUrl, { cache: 'no-cache' }),
         go.importObject
       );
     } else {
-      const resp = await fetch('main.wasm');
+      const resp = await fetch(wasmUrl, { cache: 'no-cache' });
       const bytes = await resp.arrayBuffer();
       result = await WebAssembly.instantiate(bytes, go.importObject);
     }
