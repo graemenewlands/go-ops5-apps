@@ -11,7 +11,7 @@
 ;; ------------------------------------------------------------------------------
 ;; Class Declarations (literalize)
 ;; ------------------------------------------------------------------------------
-(literalize cluster_meta total_replicas local_replicas wan_connected)
+(literalize cluster_meta total_replicas local_replicas wan_connected req_local_quorum req_quorum)
 (literalize node id dc ring_pos health membership is_replica value timestamp)
 (literalize client_connection dc coordinator_id)
 (literalize query id type key cl write_val write_ts phase coordinator local_dc status error_reason)
@@ -20,6 +20,7 @@
 (literalize ack_accumulator query_id local_acks remote_acks total_acks highest_ts resolved_val)
 (literalize hinted_handoff query_id coordinator target_node value timestamp)
 (literalize read_repair query_id target_node repaired_val repaired_ts)
+(literalize dc_reachable from_dc to_dc)
 
 ;; ------------------------------------------------------------------------------
 ;; Stage 0: INITIALIZE QUERY & TALLY LIVE REPLICAS
@@ -66,11 +67,11 @@
     (modify <q> ^phase tally-remote-replicas)
 )
 
-;; Tally operational replicas in the remote DC (only reachable if WAN link is connected)
+;; Tally operational replicas in reachable remote DCs
 (p tally-remote-operational-replica [salience 80]
-    (cluster_meta ^wan_connected 1)
     (query ^id <qid> ^local_dc <ldc> ^phase tally-remote-replicas)
-    (node ^id <nid> ^dc { <> <ldc> } ^health U ^membership N ^is_replica 1)
+    (node ^id <nid> ^dc <rdc> { <> <ldc> } ^health U ^membership N ^is_replica 1)
+    (dc_reachable ^from_dc <ldc> ^to_dc <rdc>)
     <tally> (live_tally ^query_id <qid> ^remote_alive <rem> ^total_alive <tot>)
     -(message ^to_node <nid> ^query_id <qid> ^kind counted_remote)
   -->
@@ -81,9 +82,9 @@
 )
 
 (p tally-remote-joining-replica [salience 75]
-    (cluster_meta ^wan_connected 1)
     (query ^id <qid> ^type write ^local_dc <ldc> ^phase tally-remote-replicas)
-    (node ^id <nid> ^dc { <> <ldc> } ^health U ^membership J ^is_replica 1)
+    (node ^id <nid> ^dc <rdc> { <> <ldc> } ^health U ^membership J ^is_replica 1)
+    (dc_reachable ^from_dc <ldc> ^to_dc <rdc>)
     <tally> (live_tally ^query_id <qid> ^remote_alive <rem> ^total_alive <tot>)
     -(message ^to_node <nid> ^query_id <qid> ^kind counted_remote)
   -->
@@ -119,20 +120,38 @@
     (modify <q> ^phase complete ^status failed ^error_reason "NoHostAvailableException: Coordinator node is stopped")
 )
 
-;; Fast fail LOCAL_QUORUM: requires at least 2 alive replicas in local DC (out of 3)
-(p fail-unavailable-local-quorum [salience 90]
-    <q> (query ^id <qid> ^cl LOCAL_QUORUM ^phase verify-availability)
-    (live_tally ^query_id <qid> ^local_alive { < 2 })
+;; Fast fail if 0 replicas configured across cluster
+(p fail-unavailable-zero-replicas [salience 96]
+    <q> (query ^id <qid> ^phase verify-availability)
+    (cluster_meta ^total_replicas 0)
   -->
-    (modify <q> ^phase complete ^status failed ^error_reason "UnavailableException: Cannot achieve LOCAL_QUORUM (requires 2 live local replicas)")
+    (modify <q> ^phase complete ^status failed ^error_reason "UnavailableException: 0 replicas configured in cluster")
 )
 
-;; Fast fail QUORUM: requires at least 4 alive replicas across cluster (out of 6)
-(p fail-unavailable-quorum [salience 90]
-    <q> (query ^id <qid> ^cl QUORUM ^phase verify-availability)
-    (live_tally ^query_id <qid> ^total_alive { < 4 })
+;; Fast fail if 0 replicas configured in local DC for LOCAL_QUORUM
+(p fail-unavailable-zero-local-replicas [salience 95]
+    <q> (query ^id <qid> ^cl LOCAL_QUORUM ^phase verify-availability)
+    (cluster_meta ^local_replicas 0)
   -->
-    (modify <q> ^phase complete ^status failed ^error_reason "UnavailableException: Cannot achieve QUORUM (requires 4 live replicas across cluster)")
+    (modify <q> ^phase complete ^status failed ^error_reason "UnavailableException: Cannot achieve LOCAL_QUORUM (0 replicas configured in local DC)")
+)
+
+;; Fast fail LOCAL_QUORUM: requires at least req_local_quorum alive replicas in local DC
+(p fail-unavailable-local-quorum [salience 90]
+    (cluster_meta ^req_local_quorum <req>)
+    <q> (query ^id <qid> ^cl LOCAL_QUORUM ^phase verify-availability)
+    (live_tally ^query_id <qid> ^local_alive { < <req> })
+  -->
+    (modify <q> ^phase complete ^status failed ^error_reason "UnavailableException: Cannot achieve LOCAL_QUORUM (insufficient live local replicas)")
+)
+
+;; Fast fail QUORUM: requires at least req_quorum alive replicas across cluster
+(p fail-unavailable-quorum [salience 90]
+    (cluster_meta ^req_quorum <req>)
+    <q> (query ^id <qid> ^cl QUORUM ^phase verify-availability)
+    (live_tally ^query_id <qid> ^total_alive { < <req> })
+  -->
+    (modify <q> ^phase complete ^status failed ^error_reason "UnavailableException: Cannot achieve QUORUM (insufficient live replicas across cluster)")
 )
 
 ;; Fast fail THREE: requires at least 3 alive replicas
@@ -180,21 +199,21 @@
     (make message ^query_id <qid> ^kind request ^from_node <coord> ^to_node <nid> ^is_local 1 ^status in_flight ^payload_val none ^payload_ts 0)
 )
 
-;; Dispatch to Remote Replica (cross-DC) when WAN link is connected
+;; Dispatch to Remote Replica (cross-DC) when remote DC is reachable
 (p dispatch-to-remote-replica [salience 80]
-    (cluster_meta ^wan_connected 1)
     (query ^id <qid> ^coordinator <coord> ^local_dc <ldc> ^phase dispatch-requests)
-    (node ^id <nid> ^dc { <> <ldc> } ^is_replica 1)
+    (node ^id <nid> ^dc <rdc> { <> <ldc> } ^is_replica 1)
+    (dc_reachable ^from_dc <ldc> ^to_dc <rdc>)
     -(message ^query_id <qid> ^to_node <nid> ^kind request)
   -->
     (make message ^query_id <qid> ^kind request ^from_node <coord> ^to_node <nid> ^is_local 0 ^status in_flight ^payload_val none ^payload_ts 0)
 )
 
-;; Dispatch to Remote Replica dropped at WAN boundary when WAN link is severed
+;; Dispatch to Remote Replica dropped when remote DC is unreachable
 (p dispatch-to-remote-replica-severed [salience 82]
-    (cluster_meta ^wan_connected 0)
     (query ^id <qid> ^coordinator <coord> ^local_dc <ldc> ^phase dispatch-requests)
-    (node ^id <nid> ^dc { <> <ldc> } ^is_replica 1)
+    (node ^id <nid> ^dc <rdc> { <> <ldc> } ^is_replica 1)
+    -(dc_reachable ^from_dc <ldc> ^to_dc <rdc>)
     -(message ^query_id <qid> ^to_node <nid> ^kind request)
   -->
     (make message ^query_id <qid> ^kind request ^from_node <coord> ^to_node <nid> ^is_local 0 ^status dropped ^payload_val none ^payload_ts 0)
@@ -264,10 +283,10 @@
 
 ;; Write to severed remote replica generates hinted handoff on coordinator
 (p record-hint-for-severed-remote-replica [salience 74]
-    (cluster_meta ^wan_connected 0)
     (query ^id <qid> ^type write ^coordinator <coord> ^local_dc <ldc> ^write_val <wval> ^write_ts <wts> ^phase deliver-requests)
     (message ^query_id <qid> ^kind request ^to_node <nid> ^status dropped ^is_local 0)
-    (node ^id <nid> ^dc { <> <ldc> } ^is_replica 1)
+    (node ^id <nid> ^dc <rdc> { <> <ldc> } ^is_replica 1)
+    -(dc_reachable ^from_dc <ldc> ^to_dc <rdc>)
     -(hinted_handoff ^query_id <qid> ^target_node <nid>)
   -->
     (make hinted_handoff ^query_id <qid> ^coordinator <coord> ^target_node <nid> ^value <wval> ^timestamp <wts>)
@@ -328,18 +347,20 @@
 ;; Verify whether accumulated acknowledgments satisfy the consistency guarantee.
 ;; ------------------------------------------------------------------------------
 
-;; LOCAL_QUORUM: needs >= 2 acks from local DC
+;; LOCAL_QUORUM: needs >= req_local_quorum acks from local DC
 (p eval-local-quorum-satisfied [salience 90]
+    (cluster_meta ^req_local_quorum <req>)
     <q> (query ^id <qid> ^cl LOCAL_QUORUM ^phase evaluate-consistency)
-    (ack_accumulator ^query_id <qid> ^local_acks { >= 2 })
+    (ack_accumulator ^query_id <qid> ^local_acks { >= <req> })
   -->
     (modify <q> ^phase check-repair ^status success)
 )
 
-;; QUORUM: needs >= 4 total acks across both DCs
+;; QUORUM: needs >= req_quorum total acks across cluster
 (p eval-quorum-satisfied [salience 90]
+    (cluster_meta ^req_quorum <req>)
     <q> (query ^id <qid> ^cl QUORUM ^phase evaluate-consistency)
-    (ack_accumulator ^query_id <qid> ^total_acks { >= 4 })
+    (ack_accumulator ^query_id <qid> ^total_acks { >= <req> })
   -->
     (modify <q> ^phase check-repair ^status success)
 )

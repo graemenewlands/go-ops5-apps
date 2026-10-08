@@ -10,6 +10,8 @@ const state = {
   isExecuting: false,
   liveCoordinatorID: null, // Active coordinator for live background traffic
   wanConnected: true,
+  dcCount: 2,
+  replicasPerDc: 3,
 };
 
 // DOM References
@@ -21,6 +23,12 @@ const elements = {
   clGroup: document.getElementById('cl-group'),
   btnExecuteQuery: document.getElementById('btn-execute-query'),
   btnResetCluster: document.getElementById('btn-reset-cluster'),
+  btnAddDC: document.getElementById('btn-add-dc'),
+  btnRemoveDC: document.getElementById('btn-remove-dc'),
+  dcCountBadge: document.getElementById('dc-count-badge'),
+  btnAddReplica: document.getElementById('btn-add-replica'),
+  btnRemoveReplica: document.getElementById('btn-remove-replica'),
+  replicaCountBadge: document.getElementById('replica-count-badge'),
   btnToggleRules: document.getElementById('btn-toggle-rules'),
   ruleDrawer: document.getElementById('rule-drawer'),
   drawerBackdrop: document.getElementById('drawer-backdrop'),
@@ -34,6 +42,9 @@ const elements = {
   wanTitleText: document.getElementById('wan-title-text'),
   wanSubText: document.getElementById('wan-sub-text'),
   legendWanBadge: document.getElementById('legend-wan-badge'),
+  ringBaseDC1: document.getElementById('ring-base-dc1'),
+  ringBaseDC2: document.getElementById('ring-base-dc2'),
+  clusterEmptyMessage: document.getElementById('cluster-empty-message'),
   terminalBody: document.getElementById('terminal-body'),
   btnClearTerminal: document.getElementById('btn-clear-terminal'),
   resultSourceBadge: document.getElementById('result-source-badge'),
@@ -59,38 +70,156 @@ const elements = {
   trafficStatusText: document.getElementById('traffic-status-text'),
 };
 
-// Ring Topology Geometry
-const RING_GEOMETRY = {
-  dc1: { cx: 310, cy: 220, r: 150 },
-  dc2: { cx: 790, cy: 220, r: 150 },
-  nodeRadius: 28,
+// Datacenter Metadata
+const DC_METADATA = {
+  dc1: { name: 'Datacenter 1', region: 'US East' },
+  dc2: { name: 'Datacenter 2', region: 'US West' },
+  dc3: { name: 'Datacenter 3', region: 'EU Central' },
+  dc4: { name: 'Datacenter 4', region: 'AP South' },
+  dc5: { name: 'Datacenter 5', region: 'SA East' },
 };
+
+function getDCRegion(dcId) {
+  return (DC_METADATA[dcId] && DC_METADATA[dcId].region) ? DC_METADATA[dcId].region : dcId.toUpperCase();
+}
+
+function getDCLabel(dcId) {
+  if (!dcId) return 'No DC';
+  const meta = DC_METADATA[dcId];
+  return meta ? `${dcId.toUpperCase()} (${meta.region})` : dcId.toUpperCase();
+}
+
+const NODE_RADIUS = 28;
+let currentLayout = null;
+
+// Dynamic Ring Topology Geometry for 0 to 5 Datacenters
+function computeLayout(dcs) {
+  const dcCount = dcs ? dcs.length : 0;
+  if (dcCount === 0) {
+    return {
+      svgWidth: 1100,
+      geoms: {},
+      wanLinks: [],
+      wan: { x1: 0, x2: 0, midX: 550 },
+    };
+  }
+  if (dcCount === 1) {
+    const dcId = dcs[0].id;
+    return {
+      svgWidth: 800,
+      geoms: {
+        [dcId]: { cx: 400, cy: 220, r: 140 },
+      },
+      wanLinks: [],
+      wan: { x1: 400, x2: 400, midX: 400 },
+    };
+  }
+  if (dcCount === 2) {
+    const geoms = {
+      [dcs[0].id]: { cx: 310, cy: 220, r: 140 },
+      [dcs[1].id]: { cx: 790, cy: 220, r: 140 },
+    };
+    const wanLinks = [
+      {
+        dc1: dcs[0].id,
+        dc2: dcs[1].id,
+        x1: 310 + 140,
+        x2: 790 - 140,
+        midX: 550,
+        cy: 220,
+      },
+    ];
+    return {
+      svgWidth: 1100,
+      geoms,
+      wanLinks,
+      wan: { x1: 310, x2: 790, midX: 550 },
+    };
+  }
+
+  // 3, 4, or 5 Datacenters
+  const spacing = 380;
+  const margin = 210;
+  const svgWidth = margin * 2 + (dcCount - 1) * spacing;
+  const geoms = {};
+  dcs.forEach((dc, i) => {
+    geoms[dc.id] = {
+      cx: margin + i * spacing,
+      cy: 220,
+      r: 130,
+    };
+  });
+  const wanLinks = [];
+  for (let i = 0; i < dcCount - 1; i++) {
+    const d1 = dcs[i].id;
+    const d2 = dcs[i + 1].id;
+    wanLinks.push({
+      dc1: d1,
+      dc2: d2,
+      x1: geoms[d1].cx + geoms[d1].r,
+      x2: geoms[d2].cx - geoms[d2].r,
+      midX: (geoms[d1].cx + geoms[d2].cx) / 2,
+      cy: 220,
+    });
+  }
+  const firstCx = geoms[dcs[0].id].cx;
+  const lastCx = geoms[dcs[dcCount - 1].id].cx;
+  return {
+    svgWidth,
+    geoms,
+    wanLinks,
+    wan: { x1: firstCx, x2: lastCx, midX: (firstCx + lastCx) / 2 },
+  };
+}
 
 // WebAssembly Initialization Callback
 window.onOps5CassandraReady = () => {
+  if (state.wasmReady) return;
   console.log("==> OPS5 Cassandra Protocol Engine WebAssembly Ready");
   state.wasmReady = true;
   elements.loadingOverlay.classList.add('hidden');
-  initCluster();
 
-  // Automatically start live background cluster traffic across DC1 and DC2
+  // Defer initialization to next macrotask to ensure Go main() is settled on channel
   setTimeout(() => {
-    startAutoTraffic();
-  }, 1000);
+    initCluster();
+
+    // Automatically start live background cluster traffic across active datacenters
+    setTimeout(() => {
+      startAutoTraffic();
+    }, 1000);
+  }, 20);
 };
 
 async function initWasm() {
   const go = new Go();
   try {
-    const result = await WebAssembly.instantiateStreaming(
-      fetch('main.wasm'),
-      go.importObject
-    );
+    let result;
+    if (WebAssembly.instantiateStreaming) {
+      result = await WebAssembly.instantiateStreaming(
+        fetch('main.wasm'),
+        go.importObject
+      );
+    } else {
+      const resp = await fetch('main.wasm');
+      const bytes = await resp.arrayBuffer();
+      result = await WebAssembly.instantiate(bytes, go.importObject);
+    }
     go.run(result.instance);
+    waitForWasmReady();
   } catch (err) {
     console.error("Failed to load Wasm binary:", err);
     elements.loadingOverlay.querySelector('.loading-text').innerText = "Failed to load WebAssembly";
     elements.loadingOverlay.querySelector('.loading-subtext').innerText = err.message;
+  }
+}
+
+function waitForWasmReady() {
+  if (typeof window.cassandraInit === 'function') {
+    if (!state.wasmReady && typeof window.onOps5CassandraReady === 'function') {
+      window.onOps5CassandraReady();
+    }
+  } else {
+    setTimeout(waitForWasmReady, 50);
   }
 }
 
@@ -100,16 +229,29 @@ function initCluster() {
   const res = window.cassandraInit();
   if (res && res.success) {
     applyClusterState(res);
-    logToTerminal("// Cluster initialized successfully with 2 DCs and 12 nodes.", "text-info");
+    logToTerminal(`// Cluster initialized successfully with ${state.dcCount} DCs and ${state.dcCount * 6} nodes.`, "text-info");
   }
 }
 
 function applyClusterState(res) {
   if (res.cluster) state.cluster = res.cluster;
-  if (res.clientDc) state.clientDC = res.clientDc;
-  if (res.coordinatorId) state.coordinatorID = res.coordinatorId;
+  if (res.clientDc !== undefined) state.clientDC = res.clientDc;
+  if (res.coordinatorId !== undefined) state.coordinatorID = res.coordinatorId;
   if (res.wanConnected !== undefined) {
     state.wanConnected = res.wanConnected;
+  }
+  if (res.wanLinks !== undefined) {
+    state.wanLinks = res.wanLinks;
+  }
+  if (res.dcCount !== undefined) {
+    state.dcCount = res.dcCount;
+  } else if (state.cluster && state.cluster.dcs) {
+    state.dcCount = state.cluster.dcs.length;
+  }
+  if (res.replicasPerDc !== undefined) {
+    state.replicasPerDc = res.replicasPerDc;
+  } else if (state.cluster && state.cluster.replicasPerDc !== undefined) {
+    state.replicasPerDc = state.cluster.replicasPerDc;
   }
 
   updateControlsUI();
@@ -118,23 +260,104 @@ function applyClusterState(res) {
 }
 
 function renderWANLinkUI() {
-  const isConnected = state.wanConnected;
-  if (elements.wanLinkLayer) {
-    elements.wanLinkLayer.classList.toggle('severed', !isConnected);
+  const dcCount = (state.dcCount !== undefined) ? state.dcCount : (state.cluster && state.cluster.dcs ? state.cluster.dcs.length : 0);
+  if (!elements.wanLinkLayer) return;
+
+  if (dcCount < 2 || !currentLayout || !currentLayout.wanLinks || currentLayout.wanLinks.length === 0) {
+    elements.wanLinkLayer.innerHTML = '';
+    elements.wanLinkLayer.style.display = 'none';
+    if (elements.legendWanBadge) elements.legendWanBadge.style.display = 'none';
+    return;
   }
-  if (elements.wanTitleText) {
-    elements.wanTitleText.textContent = isConnected ? '⚡ WAN Link' : '✂️ WAN SEVERED';
-  }
-  if (elements.wanSubText) {
-    elements.wanSubText.textContent = isConnected
-      ? 'CONNECTED (Click to Sever)'
-      : 'PARTITION ACTIVE (Click to Reconnect)';
-  }
+
+  elements.wanLinkLayer.style.display = '';
+  elements.wanLinkLayer.innerHTML = '';
+
+  currentLayout.wanLinks.forEach((link) => {
+    const linkObj = (state.wanLinks || []).find(l => (l.dc1 === link.dc1 && l.dc2 === link.dc2) || (l.dc1 === link.dc2 && l.dc2 === link.dc1));
+    const isConnected = linkObj ? linkObj.connected : true;
+
+    const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+    g.setAttribute('class', `wan-btn-group ${isConnected ? '' : 'severed'}`);
+    g.setAttribute('cursor', 'pointer');
+    g.setAttribute('role', 'button');
+    g.setAttribute('tabindex', '0');
+    g.setAttribute('aria-label', `Toggle WAN Link ${link.dc1.toUpperCase()} to ${link.dc2.toUpperCase()}`);
+    g.dataset.dc1 = link.dc1;
+    g.dataset.dc2 = link.dc2;
+
+    const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    line.setAttribute('x1', link.x1);
+    line.setAttribute('y1', link.cy);
+    line.setAttribute('x2', link.x2);
+    line.setAttribute('y2', link.cy);
+    line.setAttribute('class', 'wan-line');
+    g.appendChild(line);
+
+    const pillW = (dcCount === 2) ? 140 : 116;
+    const pillH = 38;
+    const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    rect.setAttribute('x', link.midX - pillW / 2);
+    rect.setAttribute('y', link.cy - pillH / 2);
+    rect.setAttribute('width', pillW);
+    rect.setAttribute('height', pillH);
+    rect.setAttribute('rx', 8);
+    rect.setAttribute('class', 'wan-pill-bg');
+    g.appendChild(rect);
+
+    const d1Name = link.dc1.toUpperCase();
+    const d2Name = link.dc2.toUpperCase();
+
+    const textTitle = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    textTitle.setAttribute('x', link.midX);
+    textTitle.setAttribute('y', link.cy - 3);
+    textTitle.setAttribute('text-anchor', 'middle');
+    textTitle.setAttribute('class', 'wan-title-text');
+    textTitle.textContent = isConnected ? `⚡ WAN ${d1Name}–${d2Name}` : `✂️ ${d1Name}–${d2Name}`;
+    g.appendChild(textTitle);
+
+    const textSub = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    textSub.setAttribute('x', link.midX);
+    textSub.setAttribute('y', link.cy + 11);
+    textSub.setAttribute('text-anchor', 'middle');
+    textSub.setAttribute('class', 'wan-sub-text');
+    textSub.textContent = isConnected ? 'CONNECTED' : 'SEVERED';
+    g.appendChild(textSub);
+
+    g.addEventListener('click', (e) => {
+      e.stopPropagation();
+      toggleSpecificWANLink(link.dc1, link.dc2);
+    });
+
+    elements.wanLinkLayer.appendChild(g);
+  });
+
+  // Update Legend badge status
   if (elements.legendWanBadge) {
-    elements.legendWanBadge.classList.toggle('severed', !isConnected);
-    elements.legendWanBadge.textContent = isConnected
-      ? '⚡ WAN: CONNECTED'
-      : '✂️ WAN: SEVERED (PARTITION)';
+    elements.legendWanBadge.style.display = '';
+    const severedCount = (state.wanLinks || []).filter(l => !l.connected).length;
+    const isPartitioned = (severedCount > 0);
+    elements.legendWanBadge.classList.toggle('severed', isPartitioned);
+    elements.legendWanBadge.textContent = isPartitioned
+      ? `✂️ WAN: PARTITIONED (${severedCount} SEVERED)`
+      : '⚡ WAN: CONNECTED';
+  }
+}
+
+function toggleSpecificWANLink(dc1, dc2) {
+  if (!state.wasmReady) return;
+  const res = window.cassandraToggleWANLink ? window.cassandraToggleWANLink(dc1, dc2) : window.cassandraToggleWAN();
+  applyClusterState(res);
+  const linkObj = (state.wanLinks || []).find(l => (l.dc1 === dc1 && l.dc2 === dc2) || (l.dc1 === dc2 && l.dc2 === dc1));
+  const isConnected = linkObj ? linkObj.connected : true;
+  const d1Upper = dc1.toUpperCase();
+  const d2Upper = dc2.toUpperCase();
+  if (isConnected) {
+    logToTerminal(`[WAN CONNECTIVITY] WAN link between ${d1Upper} and ${d2Upper} RESTORED. Cross-DC traffic operational.`, "text-success");
+    showToast(`WAN Link ${d1Upper}–${d2Upper} Restored`);
+  } else {
+    logToTerminal(`[WAN PARTITION] WAN link between ${d1Upper} and ${d2Upper} SEVERED! Network partition created.`, "text-danger");
+    showToast(`WAN Link ${d1Upper}–${d2Upper} Severed (Partition)`, "warn");
   }
 }
 
@@ -144,22 +367,69 @@ function toggleWANConnection() {
   applyClusterState(res);
   const isConnected = state.wanConnected;
   if (isConnected) {
-    logToTerminal("[WAN LINK] Inter-datacenter WAN link RESTORED. Cross-DC replication re-enabled.", "text-success");
-    showToast("WAN Link Restored (Connected)");
+    logToTerminal("[WAN LINK] All inter-datacenter WAN links RESTORED. Cross-DC replication operational.", "text-success");
+    showToast("All WAN Links Restored (Connected)");
   } else {
-    logToTerminal("[WAN LINK] Inter-datacenter WAN link SEVERED! Network partition active between DC1 and DC2.", "text-danger");
-    showToast("WAN Link Severed (Partition Active)");
+    logToTerminal("[WAN PARTITION] All inter-datacenter WAN links SEVERED! Full cluster partition active.", "text-danger");
+    showToast("All WAN Links Severed (Cluster Partitioned)", "warn");
   }
 }
 
 function updateControlsUI() {
-  // Update DC segmented toggle
-  elements.dcToggleGroup.querySelectorAll('.btn-segmented').forEach(b => {
-    b.classList.toggle('active', b.dataset.dc === state.clientDC);
-  });
+  const dcCount = (state.dcCount !== undefined) ? state.dcCount : (state.cluster && state.cluster.dcs ? state.cluster.dcs.length : 2);
+  const repsPerDc = (state.replicasPerDc !== undefined) ? state.replicasPerDc : 3;
+
+  // Update Stepper Badges & Disabled states
+  if (elements.dcCountBadge) elements.dcCountBadge.textContent = `${dcCount} DCs`;
+  if (elements.btnRemoveDC) elements.btnRemoveDC.disabled = (dcCount <= 0);
+  if (elements.btnAddDC) elements.btnAddDC.disabled = (dcCount >= 5);
+
+  if (elements.replicaCountBadge) elements.replicaCountBadge.textContent = `${repsPerDc} / DC`;
+  if (elements.btnRemoveReplica) elements.btnRemoveReplica.disabled = (repsPerDc <= 0);
+  if (elements.btnAddReplica) elements.btnAddReplica.disabled = (repsPerDc >= 6);
+
+  // Dynamically populate DC segmented toggle buttons for all active DCs
+  if (elements.dcToggleGroup) {
+    elements.dcToggleGroup.innerHTML = '';
+    if (dcCount === 0 || !state.cluster || !state.cluster.dcs || state.cluster.dcs.length === 0) {
+      const emptySpan = document.createElement('span');
+      emptySpan.style.cssText = 'color:#64748b;font-size:0.8rem;padding:6px 10px;';
+      emptySpan.textContent = 'No DCs';
+      elements.dcToggleGroup.appendChild(emptySpan);
+    } else {
+      state.cluster.dcs.forEach(dc => {
+        const b = document.createElement('button');
+        b.className = `btn btn-segmented ${dc.id === state.clientDC ? 'active' : ''}`;
+        b.dataset.dc = dc.id;
+        b.innerText = `${dc.id.toUpperCase()} (${getDCRegion(dc.id)})`;
+        b.addEventListener('click', () => {
+          const res = window.cassandraSetClientDC(dc.id);
+          applyClusterState(res);
+          logToTerminal(`[CLIENT] Connected client to Datacenter ${getDCLabel(dc.id)}`, "text-info");
+        });
+        elements.dcToggleGroup.appendChild(b);
+      });
+    }
+  }
 
   // Populate coordinator dropdown
   elements.selectCoordinator.innerHTML = '';
+  if (dcCount === 0 || !state.cluster || !state.cluster.dcs || state.cluster.dcs.length === 0) {
+    const opt = document.createElement('option');
+    opt.value = '';
+    opt.innerText = 'None (0 Datacenters)';
+    opt.disabled = true;
+    opt.selected = true;
+    elements.selectCoordinator.appendChild(opt);
+    elements.selectCoordinator.disabled = true;
+    return;
+  }
+
+  elements.selectCoordinator.disabled = false;
+  if (!state.cluster.dcs.some(d => d.id === state.clientDC)) {
+    state.clientDC = state.cluster.dcs[0].id;
+  }
+
   const currentDC = state.cluster.dcs.find(dc => dc.id === state.clientDC);
   if (currentDC) {
     currentDC.nodes.forEach(n => {
@@ -176,17 +446,87 @@ function updateControlsUI() {
   }
 }
 
-// Render SVG Ring Topology
+// Render SVG Ring Topology for 0 to 5 Datacenters
 function renderRings() {
   elements.nodesLayer.innerHTML = '';
-  if (!state.cluster) return;
+  const dcCount = (state.dcCount !== undefined) ? state.dcCount : (state.cluster && state.cluster.dcs ? state.cluster.dcs.length : 2);
+  currentLayout = computeLayout(state.cluster ? state.cluster.dcs : []);
 
+  // Update SVG viewBox and horizontal min-width for responsive or scrolling display
+  elements.ringsSvg.setAttribute('viewBox', `0 0 ${currentLayout.svgWidth} 500`);
+  elements.ringsSvg.style.minWidth = (currentLayout.svgWidth > 1100) ? `${currentLayout.svgWidth}px` : '100%';
+
+  const ringsBaseLayer = document.getElementById('rings-base-layer');
+  if (ringsBaseLayer) {
+    ringsBaseLayer.innerHTML = '';
+  }
+
+  if (dcCount === 0 || !state.cluster || !state.cluster.dcs || state.cluster.dcs.length === 0) {
+    if (elements.clusterEmptyMessage && ringsBaseLayer) {
+      elements.clusterEmptyMessage.style.display = '';
+      const rect = elements.clusterEmptyMessage.querySelector('rect');
+      const texts = elements.clusterEmptyMessage.querySelectorAll('text');
+      const msgX = (currentLayout.svgWidth - 500) / 2;
+      if (rect) rect.setAttribute('x', msgX);
+      if (texts[0]) texts[0].setAttribute('x', currentLayout.svgWidth / 2);
+      if (texts[1]) texts[1].setAttribute('x', currentLayout.svgWidth / 2);
+      ringsBaseLayer.appendChild(elements.clusterEmptyMessage);
+    }
+    if (elements.wanLinkLayer) elements.wanLinkLayer.style.display = 'none';
+    if (elements.legendWanBadge) elements.legendWanBadge.style.display = 'none';
+    if (elements.clientLayer) elements.clientLayer.innerHTML = '';
+    return;
+  }
+
+  if (elements.clusterEmptyMessage) {
+    elements.clusterEmptyMessage.style.display = 'none';
+  }
+
+  // Dynamic WAN Link layer: rendered per adjacent pair
+  renderWANLinkUI();
+
+  // Draw ring bases dynamically
+  if (ringsBaseLayer) {
+    state.cluster.dcs.forEach((dc, idx) => {
+      const geom = currentLayout.geoms[dc.id];
+      if (!geom) return;
+
+      const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+      g.setAttribute('id', `ring-base-${dc.id}`);
+
+      const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      circle.setAttribute('cx', geom.cx);
+      circle.setAttribute('cy', geom.cy);
+      circle.setAttribute('r', geom.r);
+      circle.setAttribute('class', 'ring-circle');
+      g.appendChild(circle);
+
+      const title = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      title.setAttribute('x', geom.cx);
+      title.setAttribute('y', geom.cy - 5);
+      title.setAttribute('text-anchor', 'middle');
+      title.setAttribute('class', 'dc-title');
+      title.textContent = `Datacenter ${idx + 1}`;
+      g.appendChild(title);
+
+      const subtitle = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      subtitle.setAttribute('x', geom.cx);
+      subtitle.setAttribute('y', geom.cy + 15);
+      subtitle.setAttribute('text-anchor', 'middle');
+      subtitle.setAttribute('class', 'dc-subtitle');
+      subtitle.textContent = `${getDCRegion(dc.id)} (${dc.nodes.length} Nodes)`;
+      g.appendChild(subtitle);
+
+      ringsBaseLayer.appendChild(g);
+    });
+  }
+
+  // Draw nodes across all active datacenters
   state.cluster.dcs.forEach(dc => {
-    const geom = RING_GEOMETRY[dc.id];
-    const nodeCount = dc.nodes.length; // 6 nodes
+    const geom = currentLayout.geoms[dc.id];
+    if (!geom) return;
 
     dc.nodes.forEach((n, idx) => {
-      // 60-degree increments starting from top (-90 degrees)
       const angle = ((idx * 60) - 90) * (Math.PI / 180);
       const nx = geom.cx + geom.r * Math.cos(angle);
       const ny = geom.cy + geom.r * Math.sin(angle);
@@ -203,8 +543,13 @@ function renderClientMarker() {
   if (!clientLayer) return;
   clientLayer.innerHTML = '';
 
-  const dcId = state.clientDC;
-  const geom = RING_GEOMETRY[dcId] || RING_GEOMETRY.dc1;
+  const dcCount = (state.dcCount !== undefined) ? state.dcCount : (state.cluster && state.cluster.dcs ? state.cluster.dcs.length : 2);
+  if (dcCount === 0 || !state.cluster || !state.cluster.dcs || state.cluster.dcs.length === 0 || !currentLayout) {
+    return;
+  }
+
+  const dcId = state.cluster.dcs.some(d => d.id === state.clientDC) ? state.clientDC : state.cluster.dcs[0].id;
+  const geom = currentLayout.geoms[dcId] || { cx: 400, cy: 220, r: 140 };
   const clientX = geom.cx;
   const clientY = 460;
 
@@ -238,14 +583,15 @@ function renderClientMarker() {
   text.setAttribute('y', clientY + 4);
   text.setAttribute('text-anchor', 'middle');
   text.setAttribute('class', 'client-text');
-  text.textContent = `💻 Client → ${state.clientDC === 'dc1' ? 'DC1 (East)' : 'DC2 (West)'}`;
+  text.textContent = `💻 Client → ${getDCLabel(dcId)}`;
   g.appendChild(text);
 
   clientLayer.appendChild(g);
 }
 
 function getClientCoords() {
-  const geom = RING_GEOMETRY[state.clientDC] || RING_GEOMETRY.dc1;
+  if (!currentLayout) return { x: 400, y: 460 - 18 };
+  const geom = currentLayout.geoms[state.clientDC] || currentLayout.geoms['dc1'] || { cx: 400 };
   return { x: geom.cx, y: 460 - 18 };
 }
 
@@ -263,24 +609,33 @@ function renderNodeSVG(node, x, y, dcId) {
   g.setAttribute('id', `node-el-${node.id}`);
   g.dataset.nodeId = node.id;
 
+  // Invisible extended hit-target for effortless and reliable selection
+  const hitCircle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+  hitCircle.setAttribute('cx', x);
+  hitCircle.setAttribute('cy', y);
+  hitCircle.setAttribute('r', NODE_RADIUS + 8);
+  hitCircle.setAttribute('fill', 'transparent');
+  hitCircle.setAttribute('class', 'node-hitbox');
+  g.appendChild(hitCircle);
+
   // Node Circle
   const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
   circle.setAttribute('cx', x);
   circle.setAttribute('cy', y);
-  circle.setAttribute('r', RING_GEOMETRY.nodeRadius);
+  circle.setAttribute('r', NODE_RADIUS);
   circle.setAttribute('class', 'node-circle');
   if (node.isReplica) {
     circle.setAttribute('filter', 'url(#glow-replica)');
   }
   g.appendChild(circle);
 
-  // Node ID label (e.g. dc1-n1)
+  // Node ID label (e.g. dc1-n1 -> N1, dc3-n4 -> N4)
   const textId = document.createElementNS('http://www.w3.org/2000/svg', 'text');
   textId.setAttribute('x', x);
   textId.setAttribute('y', isClientCoord ? y - 4 : y - 6);
   textId.setAttribute('text-anchor', 'middle');
   textId.setAttribute('class', 'node-label');
-  textId.textContent = node.id.replace('dc1-', 'N').replace('dc2-', 'N');
+  textId.textContent = node.id.replace(/^dc\d+-/, 'N');
   g.appendChild(textId);
 
   // State Code Pill (UN, UJ, DS, DN)
@@ -371,7 +726,7 @@ function openNodeModal(node) {
 
   elements.modalNodeBody.innerHTML = `
     <div style="font-size:0.875rem;line-height:1.7;">
-      <div><strong>Datacenter:</strong> <code>${node.dc === 'dc1' ? 'DC1 (East)' : 'DC2 (West)'}</code></div>
+      <div><strong>Datacenter:</strong> <code>${getDCLabel(node.dc)}</code></div>
       <div><strong>Ring Position:</strong> Node ${node.ringPos} of 6</div>
       <div><strong>Lifecycle State:</strong> <code>${describeState(stateCode)}</code></div>
       <div><strong>Target Replica:</strong> ${node.isReplica ? 'Yes (Holds 50% dataset partition)' : 'No'}</div>
@@ -483,6 +838,68 @@ elements.clGroup.querySelectorAll('.cl-btn').forEach(b => {
   });
 });
 
+// Stepper Handlers: Datacenters (+/-)
+if (elements.btnAddDC) {
+  elements.btnAddDC.onclick = () => {
+    if (!state.wasmReady) return;
+    const res = window.cassandraAddDC();
+    if (res && res.success) {
+      applyClusterState(res);
+      resetMetrics();
+      logToTerminal(`[TOPOLOGY] Added Datacenter. Total DCs: ${state.dcCount}`, "text-info");
+      showToast(`Added Datacenter (${state.dcCount} DCs)`);
+    } else if (res && res.error) {
+      showToast(res.error);
+    }
+  };
+}
+
+if (elements.btnRemoveDC) {
+  elements.btnRemoveDC.onclick = () => {
+    if (!state.wasmReady) return;
+    const res = window.cassandraRemoveDC();
+    if (res && res.success) {
+      applyClusterState(res);
+      resetMetrics();
+      logToTerminal(`[TOPOLOGY] Removed Datacenter. Total DCs: ${state.dcCount}`, "text-warn");
+      showToast(`Removed Datacenter (${state.dcCount} DCs remaining)`);
+    } else if (res && res.error) {
+      showToast(res.error);
+    }
+  };
+}
+
+// Stepper Handlers: Replicas per DC (+/-)
+if (elements.btnAddReplica) {
+  elements.btnAddReplica.onclick = () => {
+    if (!state.wasmReady) return;
+    const res = window.cassandraAddReplica();
+    if (res && res.success) {
+      applyClusterState(res);
+      resetMetrics();
+      logToTerminal(`[REPLICATION] Added replica per DC. Current: ${state.replicasPerDc} replicas/DC`, "text-info");
+      showToast(`Replicas per DC: ${state.replicasPerDc}`);
+    } else if (res && res.error) {
+      showToast(res.error);
+    }
+  };
+}
+
+if (elements.btnRemoveReplica) {
+  elements.btnRemoveReplica.onclick = () => {
+    if (!state.wasmReady) return;
+    const res = window.cassandraRemoveReplica();
+    if (res && res.success) {
+      applyClusterState(res);
+      resetMetrics();
+      logToTerminal(`[REPLICATION] Removed replica per DC. Current: ${state.replicasPerDc} replicas/DC`, "text-warn");
+      showToast(`Replicas per DC: ${state.replicasPerDc}`);
+    } else if (res && res.error) {
+      showToast(res.error);
+    }
+  };
+}
+
 // Reset Cluster Handler
 elements.btnResetCluster.onclick = () => {
   const res = window.cassandraReset();
@@ -492,27 +909,23 @@ elements.btnResetCluster.onclick = () => {
   showToast("Cluster reset to default state");
 };
 
-// WAN Link Toggle Handlers (Center SVG button & Legend badge)
-if (elements.wanLinkLayer) {
-  elements.wanLinkLayer.onclick = toggleWANConnection;
-  elements.wanLinkLayer.onkeydown = (e) => {
-    if (e.key === 'Enter' || e.key === ' ') {
-      e.preventDefault();
-      toggleWANConnection();
-    }
-  };
-}
+// WAN Link Toggle Handlers (Legend badge toggles all links)
 if (elements.legendWanBadge) {
   elements.legendWanBadge.onclick = toggleWANConnection;
 }
 
 function resetMetrics() {
+  const repsPerDc = (state.replicasPerDc !== undefined) ? state.replicasPerDc : 3;
+  const dcCount = (state.dcCount !== undefined) ? state.dcCount : 2;
+  const reqLocal = repsPerDc > 0 ? Math.floor(repsPerDc / 2) + 1 : 1;
+  const reqTotal = getRequiredAcks(state.consistencyLevel, state.clientDC);
+
   elements.resultStatusBadge.className = 'badge badge-success';
   elements.resultStatusBadge.innerText = 'Ready';
-  elements.statLocalAcks.innerText = '0 / 2';
-  elements.statTotalAcks.innerText = '0 / 2';
-  elements.statLocalAlive.innerText = '3 / 3';
-  elements.statTotalAlive.innerText = '6 / 6';
+  elements.statLocalAcks.innerText = `0 / ${reqLocal}`;
+  elements.statTotalAcks.innerText = `0 / ${reqTotal}`;
+  elements.statLocalAlive.innerText = `${repsPerDc} / ${repsPerDc}`;
+  elements.statTotalAlive.innerText = `${dcCount * repsPerDc} / ${dcCount * repsPerDc}`;
   elements.statCycles.innerText = '0';
   elements.quorumProgressBar.style.width = '0%';
   elements.quorumPercentText.innerText = '0%';
@@ -603,9 +1016,14 @@ function startCountdownTimer() {
   if (trafficState.countdownId) clearInterval(trafficState.countdownId);
   trafficState.countdownId = setInterval(() => {
     if (!trafficState.isRunning) return;
+    const activeDCs = (state.cluster && state.cluster.dcs) ? state.cluster.dcs.map(d => d.id) : [];
+    if (activeDCs.length === 0) {
+      elements.trafficStatusText.innerHTML = `Live: <strong>Cluster Offline (0 DCs)</strong>`;
+      return;
+    }
     const remaining = Math.max(0, (trafficState.nextTickTime - Date.now()) / 1000);
-    const dcLabel = (trafficState.nextDC === 'dc1') ? 'DC1' : 'DC2';
-    elements.trafficStatusText.innerHTML = `Live: <strong>Active (~5s)</strong> &bull; Next: <strong>${dcLabel}</strong> in ${remaining.toFixed(1)}s`;
+    const target = activeDCs.includes(trafficState.nextDC) ? trafficState.nextDC : activeDCs[0];
+    elements.trafficStatusText.innerHTML = `Live: <strong>Active (~5s)</strong> &bull; Next: <strong>${target.toUpperCase()}</strong> in ${remaining.toFixed(1)}s`;
   }, 200);
 }
 
@@ -618,9 +1036,21 @@ async function executeAutoTrafficTick() {
     return;
   }
 
-  // 1. Alternate between DC1 and DC2
-  const targetDC = trafficState.nextDC;
-  trafficState.nextDC = (targetDC === 'dc1') ? 'dc2' : 'dc1';
+  const activeDCs = (state.cluster && state.cluster.dcs) ? state.cluster.dcs.map(d => d.id) : [];
+  if (activeDCs.length === 0) {
+    scheduleNextTraffic(2000);
+    return;
+  }
+
+  // 1. Pick DC from active datacenters (cycle through all active DCs)
+  let targetDC = trafficState.nextDC;
+  let idx = activeDCs.indexOf(targetDC);
+  if (idx === -1) {
+    idx = 0;
+    targetDC = activeDCs[0];
+  }
+  const nextIdx = (idx + 1) % activeDCs.length;
+  trafficState.nextDC = activeDCs[nextIdx];
 
   // 2. Select coordinator node in chosen DC (prefer live nodes)
   const dcObj = state.cluster && state.cluster.dcs.find(d => d.id === targetDC);
@@ -687,7 +1117,7 @@ async function executeQuery(options = {}) {
       ? (options.writeVal || `user_${Math.floor(1000 + Math.random() * 9000)}`)
       : '';
 
-    const dcLabel = (targetDC === 'dc1') ? 'DC1 (East)' : 'DC2 (West)';
+    const dcLabel = getDCLabel(targetDC);
     logToTerminal(`\n------------------------------------------------------------`, "text-muted");
     if (isAuto) {
       logToTerminal(`[LIVE TRAFFIC - ${dcLabel}] Background query executing: Type=${qType.toUpperCase()} CL=${cl} Coordinator=${coordID}`, "text-warn");
@@ -734,6 +1164,51 @@ elements.btnExecuteQuery.onclick = async () => {
   });
 };
 
+function getNodeDC(nodeID) {
+  if (!nodeID || !state.cluster || !state.cluster.dcs) return null;
+  for (const dc of state.cluster.dcs) {
+    if (dc.nodes && dc.nodes.some(n => n.id === nodeID)) return dc.id;
+  }
+  return null;
+}
+
+function getSeveredWANBoundary(fromDC, toDC) {
+  if (!state.cluster || !state.cluster.dcs || !currentLayout || !currentLayout.wanLinks) {
+    return { x: 550, y: 220 };
+  }
+  const dcs = state.cluster.dcs;
+  const idxFrom = dcs.findIndex(d => d.id === fromDC);
+  const idxTo = dcs.findIndex(d => d.id === toDC);
+  if (idxFrom === -1 || idxTo === -1) {
+    const fallbackMidX = (currentLayout && currentLayout.wan) ? currentLayout.wan.midX : 550;
+    return { x: fallbackMidX, y: 220 };
+  }
+
+  const indices = [];
+  if (idxFrom < idxTo) {
+    for (let i = idxFrom; i < idxTo; i++) indices.push(i);
+  } else {
+    for (let i = idxFrom - 1; i >= idxTo; i--) indices.push(i);
+  }
+
+  for (const i of indices) {
+    if (i < 0 || i >= dcs.length - 1) continue;
+    const d1 = dcs[i].id;
+    const d2 = dcs[i + 1].id;
+    const linkObj = (state.wanLinks || []).find(l => (l.dc1 === d1 && l.dc2 === d2) || (l.dc1 === d2 && l.dc2 === d1));
+    const isConnected = linkObj ? linkObj.connected : true;
+    if (!isConnected) {
+      const layoutLink = currentLayout.wanLinks.find(l => (l.dc1 === d1 && l.dc2 === d2) || (l.dc1 === d2 && l.dc2 === d1));
+      if (layoutLink) {
+        return { x: layoutLink.midX, y: 220 };
+      }
+    }
+  }
+
+  const fallbackMidX = (currentLayout && currentLayout.wan) ? currentLayout.wan.midX : 550;
+  return { x: fallbackMidX, y: 220 };
+}
+
 // Animated Packet Flights in SVG
 async function animateQueryPackets(res, isClientQuery = false) {
   elements.packetsLayer.innerHTML = '';
@@ -749,13 +1224,15 @@ async function animateQueryPackets(res, isClientQuery = false) {
 
   // 2. Dispatch flights from coordinator to replica nodes
   const dispatchPackets = [];
+  const coordDC = getNodeDC(res.coordinator) || state.clientDC || 'dc1';
   res.messages.forEach(m => {
     if (m.kind === 'request') {
       const destCoords = getNodeCoords(m.toNode);
       if (destCoords) {
-        if (!state.wanConnected && m.isLocal === false) {
-          // Cross-DC dispatch is severed at WAN link boundary (550, 220)
-          const wanBoundaryCoords = { x: 550, y: 220 };
+        const isSevered = (m.status === 'dropped' && m.isLocal === false);
+        if (isSevered) {
+          const destDC = getNodeDC(m.toNode);
+          const wanBoundaryCoords = getSeveredWANBoundary(coordDC, destDC);
           dispatchPackets.push({ from: coordNode, to: wanBoundaryCoords, msg: m, severed: true });
         } else {
           dispatchPackets.push({ from: coordNode, to: destCoords, msg: m, severed: false });
@@ -802,9 +1279,11 @@ async function animateQueryPackets(res, isClientQuery = false) {
 }
 
 function getNodeCoords(nodeID) {
-  if (!state.cluster) return null;
+  if (!state.cluster || !state.cluster.dcs) return null;
+  if (!currentLayout) currentLayout = computeLayout(state.cluster.dcs);
   for (const dc of state.cluster.dcs) {
-    const geom = RING_GEOMETRY[dc.id];
+    const geom = currentLayout.geoms ? currentLayout.geoms[dc.id] : null;
+    if (!geom) continue;
     const idx = dc.nodes.findIndex(n => n.id === nodeID);
     if (idx !== -1) {
       const angle = ((idx * 60) - 90) * (Math.PI / 180);
@@ -879,17 +1358,26 @@ function renderQueryResult(res, origin = 'client') {
   }
 
   // Quorum Metrics
+  const repsPerDc = (state.replicasPerDc !== undefined) ? state.replicasPerDc : (res.replicasPerDc !== undefined ? res.replicasPerDc : 3);
+  const dcCount = (state.dcCount !== undefined) ? state.dcCount : (res.dcCount !== undefined ? res.dcCount : 2);
+  const totalReps = dcCount * repsPerDc;
   const reqTotal = getRequiredAcks(res.consistencyLevel, res.localDc);
+  const reqLocal = repsPerDc > 0 ? Math.floor(repsPerDc / 2) + 1 : 1;
+
   elements.statCL.innerText = res.consistencyLevel;
-  elements.statLocalAcks.innerText = `${res.ackResult.localAcks} / 2`;
-  elements.statTotalAcks.innerText = `${res.ackResult.totalAcks} / ${reqTotal}`;
-  elements.statLocalAlive.innerText = `${res.liveTally.localAlive} / 3`;
-  elements.statTotalAlive.innerText = `${res.liveTally.totalAlive} / 6`;
-  elements.statCycles.innerText = res.stats.cycleCount;
+  const localAcks = res.ackResult ? res.ackResult.localAcks : 0;
+  const totalAcks = res.ackResult ? res.ackResult.totalAcks : 0;
+  elements.statLocalAcks.innerText = `${localAcks} / ${reqLocal}`;
+  elements.statTotalAcks.innerText = `${totalAcks} / ${reqTotal}`;
+  const localAlive = res.liveTally ? res.liveTally.localAlive : 0;
+  const totalAlive = res.liveTally ? res.liveTally.totalAlive : 0;
+  elements.statLocalAlive.innerText = `${localAlive} / ${repsPerDc}`;
+  elements.statTotalAlive.innerText = `${totalAlive} / ${totalReps}`;
+  elements.statCycles.innerText = res.stats ? res.stats.cycleCount : 0;
 
   // Quorum Progress Bar
-  const achieved = (res.consistencyLevel === 'LOCAL_QUORUM') ? res.ackResult.localAcks : res.ackResult.totalAcks;
-  const pct = Math.min(Math.round((achieved / reqTotal) * 100), 100);
+  const achieved = (res.consistencyLevel === 'LOCAL_QUORUM') ? localAcks : totalAcks;
+  const pct = (reqTotal > 0) ? Math.min(Math.round((achieved / reqTotal) * 100), 100) : 0;
   elements.quorumProgressBar.style.width = `${pct}%`;
   elements.quorumPercentText.innerText = `${pct}% (${achieved}/${reqTotal})`;
 
@@ -914,31 +1402,40 @@ function renderQueryResult(res, origin = 'client') {
   }
 
   // Detailed Terminal Logs
-  logToTerminal(`[DISPATCH] Natural endpoints: 6 replicas (3 local in ${res.localDc}, 3 remote)`, "text-info");
-  logToTerminal(`[PRE-FLIGHT] Live replicas tally: Local=${res.liveTally.localAlive}/3, Remote=${res.liveTally.remoteAlive}/3, Total=${res.liveTally.totalAlive}/6`, "text-info");
+  const localDcName = res.localDc ? res.localDc.toUpperCase() : 'NONE';
+  const remoteReps = Math.max(0, totalReps - repsPerDc);
+  logToTerminal(`[DISPATCH] Natural endpoints: ${totalReps} replicas (${repsPerDc} local in ${localDcName}, ${remoteReps} remote)`, "text-info");
+  if (res.liveTally) {
+    const remoteAlive = res.liveTally.remoteAlive || 0;
+    logToTerminal(`[PRE-FLIGHT] Live replicas tally: Local=${localAlive}/${repsPerDc}, Remote=${remoteAlive}/${remoteReps}, Total=${totalAlive}/${totalReps}`, "text-info");
+  }
 
   if (!res.success) {
     logToTerminal(`[EXCEPTION] ${res.errorReason}`, "text-danger");
-    logToTerminal(`[RESULT] Query FAILED in ${res.stats.elapsedMs.toFixed(2)}ms (${res.stats.cycleCount} OPS5 cycles)`, "text-danger");
+    logToTerminal(`[RESULT] Query FAILED in ${res.stats ? res.stats.elapsedMs.toFixed(2) : '0.00'}ms (${res.stats ? res.stats.cycleCount : 0} OPS5 cycles)`, "text-danger");
     if (origin === 'client') showToast(`Query Failed: ${res.errorReason}`);
   } else {
-    logToTerminal(`[ACKS] Coordinator received ${res.ackResult.totalAcks} total acks (${res.ackResult.localAcks} local in ${res.localDc})`, "text-success");
+    logToTerminal(`[ACKS] Coordinator received ${totalAcks} total acks (${localAcks} local in ${localDcName})`, "text-success");
     if (res.queryType === 'read') {
       logToTerminal(`[VALUE RESOLUTION] Read resolved value="${res.resolvedValue}" (Timestamp=${res.highestTimestamp})`, "text-success");
     }
-    logToTerminal(`[RESULT] Query SUCCESS at CL=${res.consistencyLevel} in ${res.stats.elapsedMs.toFixed(2)}ms (${res.stats.cycleCount} OPS5 cycles)`, "text-success");
+    logToTerminal(`[RESULT] Query SUCCESS at CL=${res.consistencyLevel} in ${res.stats ? res.stats.elapsedMs.toFixed(2) : '0.00'}ms (${res.stats ? res.stats.cycleCount : 0} OPS5 cycles)`, "text-success");
     if (origin === 'client') showToast(`Query Success at ${res.consistencyLevel}!`);
   }
 }
 
 function getRequiredAcks(cl, localDc) {
+  const repsPerDc = (state.replicasPerDc !== undefined) ? state.replicasPerDc : 3;
+  const dcCount = (state.dcCount !== undefined) ? state.dcCount : 2;
+  const totalReplicas = dcCount * repsPerDc;
+
   switch (cl) {
     case 'ONE': return 1;
     case 'TWO': return 2;
     case 'THREE': return 3;
-    case 'LOCAL_QUORUM': return 2;
-    case 'QUORUM': return 4;
-    default: return 2;
+    case 'LOCAL_QUORUM': return repsPerDc > 0 ? Math.floor(repsPerDc / 2) + 1 : 1;
+    case 'QUORUM': return totalReplicas > 0 ? Math.floor(totalReplicas / 2) + 1 : 1;
+    default: return 1;
   }
 }
 

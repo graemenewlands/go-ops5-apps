@@ -71,6 +71,37 @@
         </div>
       </div>
 
+      <!-- Cluster Topology Steppers -->
+      <div class="control-group">
+        <label class="control-label">Datacenters</label>
+        <div class="stepper-group">
+          <button id="btn-remove-dc" class="btn btn-secondary btn-stepper" title="Remove Datacenter (down to 0)">
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+            <span>- DC</span>
+          </button>
+          <span id="dc-count-badge" class="stepper-count-badge">2 DCs</span>
+          <button id="btn-add-dc" class="btn btn-secondary btn-stepper" title="Add Datacenter (up to 5)">
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+            <span>+ DC</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="control-group">
+        <label class="control-label">Replicas / DC</label>
+        <div class="stepper-group">
+          <button id="btn-remove-replica" class="btn btn-secondary btn-stepper" title="Remove Replica per DC (down to 0)">
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+            <span>- Replica</span>
+          </button>
+          <span id="replica-count-badge" class="stepper-count-badge">3 / DC</span>
+          <button id="btn-add-replica" class="btn btn-secondary btn-stepper" title="Add Replica per DC (up to 6)">
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+            <span>+ Replica</span>
+          </button>
+        </div>
+      </div>
+
       <!-- Query Type -->
       <div class="control-group">
         <label class="control-label">Query Operation</label>
@@ -153,13 +184,8 @@
             </marker>
           </defs>
 
-          <!-- Inter-DC WAN Link Button (Click to Sever / Reconnect) -->
-          <g id="wan-link-layer" class="wan-btn-group" cursor="pointer" role="button" tabindex="0" aria-label="Toggle WAN Link">
-            <line id="wan-line-el" x1="310" y1="220" x2="790" y2="220" class="wan-line" />
-            <rect id="wan-pill-bg" x="460" y="198" width="180" height="44" rx="8" class="wan-pill-bg" />
-            <text id="wan-title-text" x="550" y="217" text-anchor="middle" class="wan-title-text">⚡ WAN Link</text>
-            <text id="wan-sub-text" x="550" y="232" text-anchor="middle" class="wan-sub-text">CONNECTED (Click to Sever)</text>
-          </g>
+          <!-- Inter-DC WAN Links Layer (Dynamically populated with interactive WAN links between adjacent DCs) -->
+          <g id="wan-link-layer"></g>
 
           <!-- Dynamic Packet Flights Layer -->
           <g id="packets-layer"></g>
@@ -167,14 +193,25 @@
           <!-- Rings Layer (DC1 and DC2 circles) -->
           <g id="rings-base-layer">
             <!-- DC1 Ring -->
-            <circle cx="310" cy="220" r="150" class="ring-circle" />
-            <text x="310" y="215" text-anchor="middle" class="dc-title">Datacenter 1</text>
-            <text x="310" y="235" text-anchor="middle" class="dc-subtitle">East Ring (6 Nodes)</text>
+            <g id="ring-base-dc1">
+              <circle cx="310" cy="220" r="150" class="ring-circle" />
+              <text x="310" y="215" text-anchor="middle" class="dc-title">Datacenter 1</text>
+              <text x="310" y="235" text-anchor="middle" class="dc-subtitle">East Ring (6 Nodes)</text>
+            </g>
 
             <!-- DC2 Ring -->
-            <circle cx="790" cy="220" r="150" class="ring-circle" />
-            <text x="790" y="215" text-anchor="middle" class="dc-title">Datacenter 2</text>
-            <text x="790" y="235" text-anchor="middle" class="dc-subtitle">West Ring (6 Nodes)</text>
+            <g id="ring-base-dc2">
+              <circle cx="790" cy="220" r="150" class="ring-circle" />
+              <text x="790" y="215" text-anchor="middle" class="dc-title">Datacenter 2</text>
+              <text x="790" y="235" text-anchor="middle" class="dc-subtitle">West Ring (6 Nodes)</text>
+            </g>
+
+            <!-- Empty Cluster State (shown when 0 DCs) -->
+            <g id="cluster-empty-message" style="display: none;">
+              <rect x="300" y="180" width="500" height="80" rx="12" fill="#0f172a" stroke="#ef4444" stroke-width="2" stroke-dasharray="6 4" opacity="0.9" />
+              <text x="550" y="215" text-anchor="middle" class="empty-cluster-text">⚠️ Cluster Offline: 0 Datacenters Deployed</text>
+              <text x="550" y="240" text-anchor="middle" class="empty-cluster-subtext">Click [+ DC] in control panel to deploy a Cassandra ring</text>
+            </g>
           </g>
 
           <!-- User Client Layer -->

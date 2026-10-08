@@ -4,6 +4,9 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
+	"log"
+	"runtime/debug"
 	"syscall/js"
 
 	"github.com/graemenewlands/go-ops5-apps/apps/cassandra"
@@ -12,37 +15,72 @@ import (
 
 var currentEngine *cassandra.CassandraEngine
 
+func safeCallback(fn func(this js.Value, args []js.Value) any) js.Func {
+	return js.FuncOf(func(this js.Value, args []js.Value) (result any) {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("PANIC recovered in wasm callback: %v\n%s", r, debug.Stack())
+				result = map[string]any{
+					"success": false,
+					"error":   fmt.Sprintf("WASM panic: %v", r),
+				}
+			}
+		}()
+		return fn(this, args)
+	})
+}
+
 func main() {
 	c := make(chan struct{}, 0)
 
-	// Register JS callbacks
-	js.Global().Set("cassandraInit", js.FuncOf(cassandraInit))
-	js.Global().Set("cassandraGetCluster", js.FuncOf(cassandraGetCluster))
-	js.Global().Set("cassandraReset", js.FuncOf(cassandraReset))
-	js.Global().Set("cassandraSetClientDC", js.FuncOf(cassandraSetClientDC))
-	js.Global().Set("cassandraSetCoordinator", js.FuncOf(cassandraSetCoordinator))
-	js.Global().Set("cassandraPullPlug", js.FuncOf(cassandraPullPlug))
-	js.Global().Set("cassandraCycleNodeState", js.FuncOf(cassandraCycleNodeState))
-	js.Global().Set("cassandraSetNodeState", js.FuncOf(cassandraSetNodeState))
-	js.Global().Set("cassandraExecuteQuery", js.FuncOf(cassandraExecuteQuery))
-	js.Global().Set("cassandraToggleWAN", js.FuncOf(cassandraToggleWAN))
-	js.Global().Set("cassandraSetWAN", js.FuncOf(cassandraSetWAN))
-	js.Global().Set("cassandraGetRuleSource", js.FuncOf(cassandraGetRuleSource))
+	// Pre-initialize Cassandra engine during startup
+	eng, err := cassandra.NewCassandraEngine(nil)
+	if err != nil {
+		log.Printf("Failed to initialize Cassandra engine: %v", err)
+	} else {
+		currentEngine = eng
+	}
 
-	// Signal to JS that Wasm module is ready
+	// Register JS callbacks with safe panic recovery
+	js.Global().Set("cassandraInit", safeCallback(cassandraInit))
+	js.Global().Set("cassandraGetCluster", safeCallback(cassandraGetCluster))
+	js.Global().Set("cassandraReset", safeCallback(cassandraReset))
+	js.Global().Set("cassandraSetClientDC", safeCallback(cassandraSetClientDC))
+	js.Global().Set("cassandraSetCoordinator", safeCallback(cassandraSetCoordinator))
+	js.Global().Set("cassandraPullPlug", safeCallback(cassandraPullPlug))
+	js.Global().Set("cassandraCycleNodeState", safeCallback(cassandraCycleNodeState))
+	js.Global().Set("cassandraSetNodeState", safeCallback(cassandraSetNodeState))
+	js.Global().Set("cassandraExecuteQuery", safeCallback(cassandraExecuteQuery))
+	js.Global().Set("cassandraToggleWAN", safeCallback(cassandraToggleWAN))
+	js.Global().Set("cassandraSetWAN", safeCallback(cassandraSetWAN))
+	js.Global().Set("cassandraToggleWANLink", safeCallback(cassandraToggleWANLink))
+	js.Global().Set("cassandraSetWANLink", safeCallback(cassandraSetWANLink))
+	js.Global().Set("cassandraAddDC", safeCallback(cassandraAddDC))
+	js.Global().Set("cassandraRemoveDC", safeCallback(cassandraRemoveDC))
+	js.Global().Set("cassandraAddReplica", safeCallback(cassandraAddReplica))
+	js.Global().Set("cassandraRemoveReplica", safeCallback(cassandraRemoveReplica))
+	js.Global().Set("cassandraSetDCCount", safeCallback(cassandraSetDCCount))
+	js.Global().Set("cassandraSetReplicasPerDC", safeCallback(cassandraSetReplicasPerDC))
+	js.Global().Set("cassandraGetRuleSource", safeCallback(cassandraGetRuleSource))
+
+	// Signal to JS that Wasm module is ready asynchronously via setTimeout to avoid re-entrancy
 	if readyFn := js.Global().Get("onOps5CassandraReady"); readyFn.Type() == js.TypeFunction {
-		readyFn.Invoke()
+		js.Global().Call("setTimeout", readyFn, 0)
 	}
 
 	<-c
 }
 
 func cassandraInit(this js.Value, args []js.Value) any {
-	eng, err := cassandra.NewCassandraEngine(nil)
-	if err != nil {
-		return map[string]any{"success": false, "error": err.Error()}
+	if currentEngine == nil {
+		eng, err := cassandra.NewCassandraEngine(nil)
+		if err != nil {
+			return map[string]any{"success": false, "error": err.Error()}
+		}
+		currentEngine = eng
+	} else {
+		currentEngine.ResetCluster()
 	}
-	currentEngine = eng
 
 	return getClusterState()
 }
@@ -186,8 +224,10 @@ func cassandraExecuteQuery(this js.Value, args []js.Value) any {
 		return map[string]any{"success": false, "error": err.Error()}
 	}
 
-	parsed["cluster"] = getClusterState()["cluster"]
-	parsed["wanConnected"] = currentEngine.WANConnected()
+	clusterState := getClusterState()
+	parsed["cluster"] = clusterState["cluster"]
+	parsed["wanConnected"] = clusterState["wanConnected"]
+	parsed["wanLinks"] = clusterState["wanLinks"]
 	return parsed
 }
 
@@ -211,6 +251,107 @@ func cassandraSetWAN(this js.Value, args []js.Value) any {
 	return getClusterState()
 }
 
+func cassandraToggleWANLink(this js.Value, args []js.Value) any {
+	if currentEngine == nil {
+		return map[string]any{"success": false, "error": "engine not initialized"}
+	}
+	if len(args) < 2 {
+		return map[string]any{"success": false, "error": "missing dc arguments"}
+	}
+	dc1 := args[0].String()
+	dc2 := args[1].String()
+	currentEngine.ToggleWANLink(dc1, dc2)
+	return getClusterState()
+}
+
+func cassandraSetWANLink(this js.Value, args []js.Value) any {
+	if currentEngine == nil {
+		return map[string]any{"success": false, "error": "engine not initialized"}
+	}
+	if len(args) < 3 {
+		return map[string]any{"success": false, "error": "missing arguments"}
+	}
+	dc1 := args[0].String()
+	dc2 := args[1].String()
+	connected := args[2].Bool()
+	currentEngine.SetWANLink(dc1, dc2, connected)
+	return getClusterState()
+}
+
+func cassandraAddDC(this js.Value, args []js.Value) any {
+	if currentEngine == nil {
+		return map[string]any{"success": false, "error": "engine not initialized"}
+	}
+	_, err := currentEngine.AddDatacenter()
+	if err != nil {
+		return map[string]any{"success": false, "error": err.Error()}
+	}
+	return getClusterState()
+}
+
+func cassandraRemoveDC(this js.Value, args []js.Value) any {
+	if currentEngine == nil {
+		return map[string]any{"success": false, "error": "engine not initialized"}
+	}
+	err := currentEngine.RemoveDatacenter()
+	if err != nil {
+		return map[string]any{"success": false, "error": err.Error()}
+	}
+	return getClusterState()
+}
+
+func cassandraAddReplica(this js.Value, args []js.Value) any {
+	if currentEngine == nil {
+		return map[string]any{"success": false, "error": "engine not initialized"}
+	}
+	_, err := currentEngine.AddReplicaPerDC()
+	if err != nil {
+		return map[string]any{"success": false, "error": err.Error()}
+	}
+	return getClusterState()
+}
+
+func cassandraRemoveReplica(this js.Value, args []js.Value) any {
+	if currentEngine == nil {
+		return map[string]any{"success": false, "error": "engine not initialized"}
+	}
+	_, err := currentEngine.RemoveReplicaPerDC()
+	if err != nil {
+		return map[string]any{"success": false, "error": err.Error()}
+	}
+	return getClusterState()
+}
+
+func cassandraSetDCCount(this js.Value, args []js.Value) any {
+	if currentEngine == nil {
+		return map[string]any{"success": false, "error": "engine not initialized"}
+	}
+	if len(args) < 1 {
+		return map[string]any{"success": false, "error": "missing count argument"}
+	}
+	count := args[0].Int()
+	err := currentEngine.SetDCCount(count)
+	if err != nil {
+		return map[string]any{"success": false, "error": err.Error()}
+	}
+	return getClusterState()
+}
+
+func cassandraSetReplicasPerDC(this js.Value, args []js.Value) any {
+	if currentEngine == nil {
+		return map[string]any{"success": false, "error": "engine not initialized"}
+	}
+	if len(args) < 1 {
+		return map[string]any{"success": false, "error": "missing replicas argument"}
+	}
+	reps := args[0].Int()
+	err := currentEngine.SetReplicasPerDC(reps)
+	if err != nil {
+		return map[string]any{"success": false, "error": err.Error()}
+	}
+	return getClusterState()
+}
+
 func cassandraGetRuleSource(this js.Value, args []js.Value) any {
 	return cassandra.CassandraRulesSource
 }
@@ -221,11 +362,25 @@ func getClusterState() map[string]any {
 	var parsedCfg any
 	_ = json.Unmarshal(bytes, &parsedCfg)
 
+	dcCount := len(cfg.DCs)
+	wanLinks := currentEngine.GetWANLinks()
+	var jsLinks []any
+	for _, l := range wanLinks {
+		jsLinks = append(jsLinks, map[string]any{
+			"dc1":       l.DC1,
+			"dc2":       l.DC2,
+			"connected": l.Connected,
+		})
+	}
+
 	return map[string]any{
 		"success":       true,
 		"cluster":       parsedCfg,
 		"clientDc":      currentEngine.ClientDC(),
 		"coordinatorId": currentEngine.CoordinatorID(),
 		"wanConnected":  currentEngine.WANConnected(),
+		"wanLinks":      jsLinks,
+		"dcCount":       dcCount,
+		"replicasPerDc": cfg.ReplicasPerDC,
 	}
 }

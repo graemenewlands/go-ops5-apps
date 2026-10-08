@@ -84,13 +84,28 @@ type QueryResult struct {
 	Stats            EngineStats       `json:"stats"`
 }
 
+// WANLinkState represents the state of a WAN link between two adjacent datacenters.
+type WANLinkState struct {
+	DC1       string `json:"dc1"`
+	DC2       string `json:"dc2"`
+	Connected bool   `json:"connected"`
+}
+
+func linkKey(dc1, dc2 string) string {
+	if dc1 > dc2 {
+		dc1, dc2 = dc2, dc1
+	}
+	return dc1 + ":" + dc2
+}
+
 // CassandraEngine wraps the OPS5 rule engine and cluster state.
 type CassandraEngine struct {
 	mu            sync.RWMutex
 	cluster       *data.ClusterConfig
 	clientDC      string
 	coordinatorID string
-	wanConnected  bool // True = WAN operational, False = Network Partition
+	wanConnected  bool // True = all active WAN links operational, False = at least one partition
+	severedLinks  map[string]bool // normalized "dcA:dcB" -> true if severed
 	queryCounter  int64
 	parsedRules   []*model.Rule
 }
@@ -111,6 +126,7 @@ func NewCassandraEngine(cfg *data.ClusterConfig) (*CassandraEngine, error) {
 		clientDC:      "dc1",
 		coordinatorID: "dc1-n1",
 		wanConnected:  true,
+		severedLinks:  make(map[string]bool),
 		parsedRules:   rules,
 	}
 
@@ -124,25 +140,157 @@ func (ce *CassandraEngine) ClusterConfig() *data.ClusterConfig {
 	return ce.cluster
 }
 
-// WANConnected returns true if the inter-datacenter WAN link is operational.
+// GetWANLinks returns the active adjacent WAN links across current datacenters.
+func (ce *CassandraEngine) GetWANLinks() []WANLinkState {
+	ce.mu.RLock()
+	defer ce.mu.RUnlock()
+
+	var links []WANLinkState
+	for i := 0; i < len(ce.cluster.DCs)-1; i++ {
+		dc1 := ce.cluster.DCs[i].ID
+		dc2 := ce.cluster.DCs[i+1].ID
+		key := linkKey(dc1, dc2)
+		severed := ce.severedLinks != nil && ce.severedLinks[key]
+		links = append(links, WANLinkState{
+			DC1:       dc1,
+			DC2:       dc2,
+			Connected: !severed,
+		})
+	}
+	return links
+}
+
+// SetWANLink sets the operational state of a specific WAN link between two datacenters.
+func (ce *CassandraEngine) SetWANLink(dc1, dc2 string, connected bool) {
+	ce.mu.Lock()
+	defer ce.mu.Unlock()
+
+	if ce.severedLinks == nil {
+		ce.severedLinks = make(map[string]bool)
+	}
+	key := linkKey(dc1, dc2)
+	if connected {
+		delete(ce.severedLinks, key)
+	} else {
+		ce.severedLinks[key] = true
+	}
+	ce.updateGlobalWANFlagLocked()
+}
+
+// ToggleWANLink toggles the state of a specific WAN link between operational and severed.
+func (ce *CassandraEngine) ToggleWANLink(dc1, dc2 string) bool {
+	ce.mu.Lock()
+	defer ce.mu.Unlock()
+
+	if ce.severedLinks == nil {
+		ce.severedLinks = make(map[string]bool)
+	}
+	key := linkKey(dc1, dc2)
+	nowSevered := !ce.severedLinks[key]
+	if nowSevered {
+		ce.severedLinks[key] = true
+	} else {
+		delete(ce.severedLinks, key)
+	}
+	ce.updateGlobalWANFlagLocked()
+	return !nowSevered
+}
+
+func (ce *CassandraEngine) updateGlobalWANFlagLocked() {
+	allConnected := true
+	for i := 0; i < len(ce.cluster.DCs)-1; i++ {
+		dc1 := ce.cluster.DCs[i].ID
+		dc2 := ce.cluster.DCs[i+1].ID
+		if ce.severedLinks != nil && ce.severedLinks[linkKey(dc1, dc2)] {
+			allConnected = false
+			break
+		}
+	}
+	ce.wanConnected = allConnected
+}
+
+// IsReachable checks whether two datacenters can communicate across unpartitioned WAN links.
+func (ce *CassandraEngine) IsReachable(dcA, dcB string) bool {
+	ce.mu.RLock()
+	defer ce.mu.RUnlock()
+	return ce.isReachableLocked(dcA, dcB)
+}
+
+func (ce *CassandraEngine) isReachableLocked(dcA, dcB string) bool {
+	if dcA == dcB {
+		return true
+	}
+	idxA, idxB := -1, -1
+	for i, dc := range ce.cluster.DCs {
+		if dc.ID == dcA {
+			idxA = i
+		}
+		if dc.ID == dcB {
+			idxB = i
+		}
+	}
+	if idxA == -1 || idxB == -1 {
+		return false
+	}
+	start, end := idxA, idxB
+	if start > end {
+		start, end = end, start
+	}
+	for i := start; i < end; i++ {
+		d1 := ce.cluster.DCs[i].ID
+		d2 := ce.cluster.DCs[i+1].ID
+		if ce.severedLinks != nil && ce.severedLinks[linkKey(d1, d2)] {
+			return false
+		}
+	}
+	return true
+}
+
+// WANConnected returns true if all inter-datacenter WAN links are operational.
 func (ce *CassandraEngine) WANConnected() bool {
 	ce.mu.RLock()
 	defer ce.mu.RUnlock()
 	return ce.wanConnected
 }
 
-// SetWANConnected explicitly sets the inter-datacenter WAN link state.
+// SetWANConnected sets all inter-datacenter WAN links to connected or severed.
 func (ce *CassandraEngine) SetWANConnected(connected bool) {
 	ce.mu.Lock()
 	defer ce.mu.Unlock()
-	ce.wanConnected = connected
+
+	if connected {
+		ce.severedLinks = make(map[string]bool)
+		ce.wanConnected = true
+	} else {
+		if ce.severedLinks == nil {
+			ce.severedLinks = make(map[string]bool)
+		}
+		for i := 0; i < len(ce.cluster.DCs)-1; i++ {
+			key := linkKey(ce.cluster.DCs[i].ID, ce.cluster.DCs[i+1].ID)
+			ce.severedLinks[key] = true
+		}
+		ce.wanConnected = false
+	}
 }
 
-// ToggleWAN toggles the inter-datacenter WAN link between operational and severed.
+// ToggleWAN toggles all inter-datacenter WAN links between fully operational and severed.
 func (ce *CassandraEngine) ToggleWAN() bool {
 	ce.mu.Lock()
 	defer ce.mu.Unlock()
-	ce.wanConnected = !ce.wanConnected
+
+	if ce.wanConnected {
+		if ce.severedLinks == nil {
+			ce.severedLinks = make(map[string]bool)
+		}
+		for i := 0; i < len(ce.cluster.DCs)-1; i++ {
+			key := linkKey(ce.cluster.DCs[i].ID, ce.cluster.DCs[i+1].ID)
+			ce.severedLinks[key] = true
+		}
+		ce.wanConnected = false
+	} else {
+		ce.severedLinks = make(map[string]bool)
+		ce.wanConnected = true
+	}
 	return ce.wanConnected
 }
 
@@ -283,6 +431,174 @@ func (ce *CassandraEngine) ResetCluster() {
 	ce.wanConnected = true
 }
 
+// DefaultDatacenterTemplates defines up to 5 datacenters available for dynamic cluster expansion.
+var DefaultDatacenterTemplates = []struct {
+	ID   string
+	Name string
+}{
+	{"dc1", "Datacenter 1 (US East)"},
+	{"dc2", "Datacenter 2 (US West)"},
+	{"dc3", "Datacenter 3 (EU Central)"},
+	{"dc4", "Datacenter 4 (AP South)"},
+	{"dc5", "Datacenter 5 (SA East)"},
+}
+
+// AddDatacenter adds a datacenter to the cluster (up to 5 DCs).
+func (ce *CassandraEngine) AddDatacenter() (*data.Datacenter, error) {
+	ce.mu.Lock()
+	defer ce.mu.Unlock()
+
+	if len(ce.cluster.DCs) >= len(DefaultDatacenterTemplates) {
+		return nil, fmt.Errorf("maximum %d datacenters in cluster", len(DefaultDatacenterTemplates))
+	}
+
+	existingIDs := make(map[string]bool)
+	for _, dc := range ce.cluster.DCs {
+		existingIDs[dc.ID] = true
+	}
+
+	var template *struct{ ID, Name string }
+	for i := range DefaultDatacenterTemplates {
+		if !existingIDs[DefaultDatacenterTemplates[i].ID] {
+			template = &DefaultDatacenterTemplates[i]
+			break
+		}
+	}
+	if template == nil {
+		return nil, fmt.Errorf("no more datacenter templates available")
+	}
+
+	newDC := data.CreateDatacenter(template.ID, template.Name, 6, ce.cluster.ReplicasPerDC)
+	ce.cluster.DCs = append(ce.cluster.DCs, newDC)
+
+	if len(ce.cluster.DCs) == 1 {
+		ce.clientDC = newDC.ID
+		if len(newDC.Nodes) > 0 {
+			ce.coordinatorID = newDC.Nodes[0].ID
+		}
+	}
+
+	return newDC, nil
+}
+
+// RemoveDatacenter removes a datacenter from the cluster (down to 0 DCs).
+func (ce *CassandraEngine) RemoveDatacenter() error {
+	ce.mu.Lock()
+	defer ce.mu.Unlock()
+
+	if len(ce.cluster.DCs) == 0 {
+		return fmt.Errorf("cluster already has 0 datacenters")
+	}
+
+	removedDC := ce.cluster.DCs[len(ce.cluster.DCs)-1]
+	ce.cluster.DCs = ce.cluster.DCs[:len(ce.cluster.DCs)-1]
+
+	if len(ce.cluster.DCs) == 0 {
+		ce.clientDC = ""
+		ce.coordinatorID = ""
+	} else if ce.clientDC == removedDC.ID {
+		ce.clientDC = ce.cluster.DCs[0].ID
+		if len(ce.cluster.DCs[0].Nodes) > 0 {
+			ce.coordinatorID = ce.cluster.DCs[0].Nodes[0].ID
+		} else {
+			ce.coordinatorID = ""
+		}
+	}
+	return nil
+}
+
+// AddReplicaPerDC increments replicas per DC (up to 6).
+func (ce *CassandraEngine) AddReplicaPerDC() (int, error) {
+	ce.mu.Lock()
+	defer ce.mu.Unlock()
+
+	if ce.cluster.ReplicasPerDC >= 6 {
+		return ce.cluster.ReplicasPerDC, fmt.Errorf("maximum 6 replicas per DC")
+	}
+
+	ce.cluster.ReplicasPerDC++
+	ce.applyReplicasPerDC()
+	return ce.cluster.ReplicasPerDC, nil
+}
+
+// RemoveReplicaPerDC decrements replicas per DC (down to 0).
+func (ce *CassandraEngine) RemoveReplicaPerDC() (int, error) {
+	ce.mu.Lock()
+	defer ce.mu.Unlock()
+
+	if ce.cluster.ReplicasPerDC <= 0 {
+		return ce.cluster.ReplicasPerDC, fmt.Errorf("minimum 0 replicas per DC")
+	}
+
+	ce.cluster.ReplicasPerDC--
+	ce.applyReplicasPerDC()
+	return ce.cluster.ReplicasPerDC, nil
+}
+
+// SetDCCount sets the datacenter count directly (0 to 5).
+func (ce *CassandraEngine) SetDCCount(count int) error {
+	ce.mu.Lock()
+	defer ce.mu.Unlock()
+
+	if count < 0 || count > len(DefaultDatacenterTemplates) {
+		return fmt.Errorf("datacenter count must be between 0 and %d", len(DefaultDatacenterTemplates))
+	}
+
+	for len(ce.cluster.DCs) < count {
+		existingIDs := make(map[string]bool)
+		for _, dc := range ce.cluster.DCs {
+			existingIDs[dc.ID] = true
+		}
+		for i := range DefaultDatacenterTemplates {
+			if !existingIDs[DefaultDatacenterTemplates[i].ID] {
+				newDC := data.CreateDatacenter(DefaultDatacenterTemplates[i].ID, DefaultDatacenterTemplates[i].Name, 6, ce.cluster.ReplicasPerDC)
+				ce.cluster.DCs = append(ce.cluster.DCs, newDC)
+				break
+			}
+		}
+	}
+
+	for len(ce.cluster.DCs) > count {
+		ce.cluster.DCs = ce.cluster.DCs[:len(ce.cluster.DCs)-1]
+	}
+
+	if len(ce.cluster.DCs) == 0 {
+		ce.clientDC = ""
+		ce.coordinatorID = ""
+	} else if ce.findNode(ce.coordinatorID) == nil {
+		ce.clientDC = ce.cluster.DCs[0].ID
+		ce.coordinatorID = ce.cluster.DCs[0].Nodes[0].ID
+	}
+
+	return nil
+}
+
+// SetReplicasPerDC sets the number of replicas per DC directly (0 to 6).
+func (ce *CassandraEngine) SetReplicasPerDC(reps int) error {
+	ce.mu.Lock()
+	defer ce.mu.Unlock()
+
+	if reps < 0 || reps > 6 {
+		return fmt.Errorf("replicas per DC must be between 0 and 6")
+	}
+
+	ce.cluster.ReplicasPerDC = reps
+	ce.applyReplicasPerDC()
+	return nil
+}
+
+func (ce *CassandraEngine) applyReplicasPerDC() {
+	for _, dc := range ce.cluster.DCs {
+		for _, n := range dc.Nodes {
+			n.IsReplica = (n.RingPos <= ce.cluster.ReplicasPerDC)
+			if n.IsReplica && n.Value == "" {
+				n.Value = "payload_v1"
+				n.Timestamp = 1000
+			}
+		}
+	}
+}
+
 // ExecuteQuery executes a read or write Cassandra query using OPS5 forward-chaining rules.
 // If optCoord is provided, it uses that coordinator and its datacenter without mutating the engine's default clientDC/coordinatorID.
 func (ce *CassandraEngine) ExecuteQuery(qType string, cl data.ConsistencyLevel, key, writeVal string, optCoord ...string) (*QueryResult, error) {
@@ -305,6 +621,25 @@ func (ce *CassandraEngine) ExecuteQuery(qType string, cl data.ConsistencyLevel, 
 	}
 	writeTS := time.Now().UnixMilli()
 
+	// If 0 datacenters exist, fail immediately with NoHostAvailableException
+	if len(ce.cluster.DCs) == 0 {
+		return &QueryResult{
+			QueryID:          queryID,
+			Success:          false,
+			ErrorReason:      "NoHostAvailableException: 0 datacenters available in cluster",
+			QueryType:        qType,
+			TargetKey:        key,
+			ConsistencyLevel: string(cl),
+			Coordinator:      "none",
+			LocalDC:          "none",
+			Stats: EngineStats{
+				CycleCount: 0,
+				ElapsedMs:  0,
+				WMECounter: 0,
+			},
+		}, nil
+	}
+
 	activeCoord := ce.coordinatorID
 	activeDC := ce.clientDC
 	if len(optCoord) > 0 && optCoord[0] != "" {
@@ -312,6 +647,10 @@ func (ce *CassandraEngine) ExecuteQuery(qType string, cl data.ConsistencyLevel, 
 			activeCoord = node.ID
 			activeDC = node.DC
 		}
+	}
+	if ce.findNode(activeCoord) == nil && len(ce.cluster.DCs) > 0 && len(ce.cluster.DCs[0].Nodes) > 0 {
+		activeCoord = ce.cluster.DCs[0].Nodes[0].ID
+		activeDC = ce.cluster.DCs[0].ID
 	}
 
 	// Instantiate fresh OPS5 engine for this query run
@@ -328,11 +667,35 @@ func (ce *CassandraEngine) ExecuteQuery(qType string, cl data.ConsistencyLevel, 
 	if !ce.wanConnected {
 		wanVal = 0
 	}
+	reqLQ := int64(999)
+	if ce.cluster.ReplicasPerDC > 0 {
+		reqLQ = int64((ce.cluster.ReplicasPerDC / 2) + 1)
+	}
+	totalReps := int64(ce.cluster.ReplicasPerDC * len(ce.cluster.DCs))
+	reqQ := int64(999)
+	if totalReps > 0 {
+		reqQ = int64((totalReps / 2) + 1)
+	}
+
 	eng.Make("cluster_meta", map[string]model.Value{
-		"total_replicas": model.NewInt(int64(ce.cluster.ReplicasPerDC * len(ce.cluster.DCs))),
-		"local_replicas": model.NewInt(int64(ce.cluster.ReplicasPerDC)),
-		"wan_connected":  model.NewInt(wanVal),
+		"total_replicas":   model.NewInt(totalReps),
+		"local_replicas":   model.NewInt(int64(ce.cluster.ReplicasPerDC)),
+		"req_local_quorum": model.NewInt(reqLQ),
+		"req_quorum":       model.NewInt(reqQ),
+		"wan_connected":    model.NewInt(wanVal),
 	})
+
+	// 1b. Assert inter-DC reachability WMEs based on WAN link state
+	for _, dcA := range ce.cluster.DCs {
+		for _, dcB := range ce.cluster.DCs {
+			if dcA.ID != dcB.ID && ce.isReachableLocked(dcA.ID, dcB.ID) {
+				eng.Make("dc_reachable", map[string]model.Value{
+					"from_dc": model.NewSymbol(dcA.ID),
+					"to_dc":   model.NewSymbol(dcB.ID),
+				})
+			}
+		}
+	}
 
 	// 2. Assert all nodes across both rings
 	for _, dc := range ce.cluster.DCs {
@@ -429,13 +792,13 @@ func (ce *CassandraEngine) ExecuteQuery(qType string, cl data.ConsistencyLevel, 
 	if len(tallyWMEs) > 0 {
 		tw := tallyWMEs[0]
 		if loc, ok := tw.Get("local_alive"); ok {
-			res.LiveTally.LocalAlive = int(loc.Raw().(int64))
+			res.LiveTally.LocalAlive = int(toInt64(loc.Raw()))
 		}
 		if rem, ok := tw.Get("remote_alive"); ok {
-			res.LiveTally.RemoteAlive = int(rem.Raw().(int64))
+			res.LiveTally.RemoteAlive = int(toInt64(rem.Raw()))
 		}
 		if tot, ok := tw.Get("total_alive"); ok {
-			res.LiveTally.TotalAlive = int(tot.Raw().(int64))
+			res.LiveTally.TotalAlive = int(toInt64(tot.Raw()))
 		}
 	}
 
@@ -444,16 +807,16 @@ func (ce *CassandraEngine) ExecuteQuery(qType string, cl data.ConsistencyLevel, 
 	if len(accWMEs) > 0 {
 		aw := accWMEs[0]
 		if loc, ok := aw.Get("local_acks"); ok {
-			res.AckResult.LocalAcks = int(loc.Raw().(int64))
+			res.AckResult.LocalAcks = int(toInt64(loc.Raw()))
 		}
 		if rem, ok := aw.Get("remote_acks"); ok {
-			res.AckResult.RemoteAcks = int(rem.Raw().(int64))
+			res.AckResult.RemoteAcks = int(toInt64(rem.Raw()))
 		}
 		if tot, ok := aw.Get("total_acks"); ok {
-			res.AckResult.TotalAcks = int(tot.Raw().(int64))
+			res.AckResult.TotalAcks = int(toInt64(tot.Raw()))
 		}
 		if hi, ok := aw.Get("highest_ts"); ok {
-			res.HighestTimestamp = hi.Raw().(int64)
+			res.HighestTimestamp = toInt64(hi.Raw())
 		}
 		if rval, ok := aw.Get("resolved_val"); ok {
 			res.ResolvedValue = fmt.Sprintf("%v", rval.Raw())
@@ -575,4 +938,21 @@ func (ce *CassandraEngine) findNode(id string) *data.Node {
 		}
 	}
 	return nil
+}
+
+func toInt64(val any) int64 {
+	switch v := val.(type) {
+	case int64:
+		return v
+	case int:
+		return int64(v)
+	case int32:
+		return int64(v)
+	case float64:
+		return int64(v)
+	case float32:
+		return int64(v)
+	default:
+		return 0
+	}
 }

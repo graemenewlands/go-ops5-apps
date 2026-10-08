@@ -83,37 +83,20 @@ type ClusterConfig struct {
 	Consistency    ConsistencyLevel `json:"consistency"`
 }
 
-// DefaultCluster returns a 2-datacenter cluster, each with 6 nodes, where 3 nodes per DC are replicas.
-func DefaultCluster() *ClusterConfig {
-	dc1Nodes := make([]*Node, 6)
-	dc2Nodes := make([]*Node, 6)
-
-	// In a 6-node ring with 50% distribution (3 replicas out of 6 nodes),
-	// nodes 1, 2, 3 own the token range for the queried dataset.
-	for i := 1; i <= 6; i++ {
-		isReplica := (i <= 3)
+// CreateDatacenter initializes a new datacenter with nodeCount nodes and repsPerDC replicas.
+func CreateDatacenter(id, name string, nodeCount, repsPerDC int) *Datacenter {
+	nodes := make([]*Node, nodeCount)
+	for i := 1; i <= nodeCount; i++ {
+		isReplica := (i <= repsPerDC)
 		val := ""
 		var ts int64 = 0
 		if isReplica {
 			val = "payload_v1"
 			ts = 1000
 		}
-		dc1Nodes[i-1] = &Node{
-			ID:         fmt.Sprintf("dc1-n%d", i),
-			DC:         "dc1",
-			RingPos:    i,
-			Health:     HealthUp,
-			Membership: MembershipNormal,
-			IsReplica:  isReplica,
-			Value:      val,
-			Timestamp:  ts,
-			TokenStart: int64((i - 1) * 60),
-			TokenEnd:   int64(i * 60),
-		}
-
-		dc2Nodes[i-1] = &Node{
-			ID:         fmt.Sprintf("dc2-n%d", i),
-			DC:         "dc2",
+		nodes[i-1] = &Node{
+			ID:         fmt.Sprintf("%s-n%d", id, i),
+			DC:         id,
 			RingPos:    i,
 			Health:     HealthUp,
 			Membership: MembershipNormal,
@@ -124,15 +107,23 @@ func DefaultCluster() *ClusterConfig {
 			TokenEnd:   int64(i * 60),
 		}
 	}
+	return &Datacenter{
+		ID:    id,
+		Name:  name,
+		Nodes: nodes,
+	}
+}
 
+// DefaultCluster returns a 2-datacenter cluster, each with 6 nodes, where 3 nodes per DC are replicas.
+func DefaultCluster() *ClusterConfig {
 	return &ClusterConfig{
 		NodesPerDC:     6,
 		ReplicasPerDC:  3,
 		DefaultDataset: "users_dataset",
 		DefaultValue:   "payload_v1",
 		DCs: []*Datacenter{
-			{ID: "dc1", Name: "Datacenter 1 (East)", Nodes: dc1Nodes},
-			{ID: "dc2", Name: "Datacenter 2 (West)", Nodes: dc2Nodes},
+			CreateDatacenter("dc1", "Datacenter 1 (East)", 6, 3),
+			CreateDatacenter("dc2", "Datacenter 2 (West)", 6, 3),
 		},
 		Consistency: ConsistencyLocalQuorum,
 	}
