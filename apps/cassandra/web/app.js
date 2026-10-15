@@ -945,14 +945,14 @@ const trafficState = {
 const CONSISTENCY_LEVELS = ['ONE', 'TWO', 'THREE', 'LOCAL_QUORUM', 'QUORUM'];
 const QUERY_TYPES = ['read', 'read', 'write']; // 67% reads, 33% writes typical Cassandra workload
 
-// Box-Muller Gaussian / Normal Distribution Sampling (mean ~5000ms, stdDev ~1200ms)
-function sampleNormalInterval(mean = 5000, stdDev = 1200) {
+// Box-Muller Gaussian / Normal Distribution Sampling (mean ~1000ms, stdDev ~250ms)
+function sampleNormalInterval(mean = 1000, stdDev = 250) {
   let u = 0, v = 0;
   while (u === 0) u = Math.random();
   while (v === 0) v = Math.random();
   const z = Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
-  // Clamped between 2000ms and 8500ms
-  return Math.max(2000, Math.min(8500, Math.round(mean + z * stdDev)));
+  // Clamped between 500ms and 1800ms
+  return Math.max(500, Math.min(1800, Math.round(mean + z * stdDev)));
 }
 
 function toggleAutoTraffic() {
@@ -975,10 +975,10 @@ function startAutoTraffic() {
   elements.trafficBtnText.innerText = "Pause Live Traffic";
   elements.trafficStatusBadge.classList.add('active');
 
-  logToTerminal("[TRAFFIC GENERATOR] Live background cluster traffic running across DC1 and DC2 (~5.0s normal distribution).", "text-warn");
+  logToTerminal("[TRAFFIC GENERATOR] Live background cluster traffic running across DC1 and DC2 (~1.0s normal distribution).", "text-warn");
 
-  // Schedule first tick after 1.2s lead-in
-  scheduleNextTraffic(1200);
+  // Schedule first tick after 0.3s lead-in
+  scheduleNextTraffic(300);
   startCountdownTimer();
 }
 
@@ -1024,7 +1024,7 @@ function startCountdownTimer() {
     }
     const remaining = Math.max(0, (trafficState.nextTickTime - Date.now()) / 1000);
     const target = activeDCs.includes(trafficState.nextDC) ? trafficState.nextDC : activeDCs[0];
-    elements.trafficStatusText.innerHTML = `Live: <strong>Active (~5s)</strong> &bull; Next: <strong>${target.toUpperCase()}</strong> in ${remaining.toFixed(1)}s`;
+    elements.trafficStatusText.innerHTML = `Live: <strong>Active (~1s)</strong> &bull; Next: <strong>${target.toUpperCase()}</strong> in ${remaining.toFixed(1)}s`;
   }, 200);
 }
 
@@ -1033,7 +1033,7 @@ async function executeAutoTrafficTick() {
 
   if (state.isExecuting) {
     // If a manual client query is currently running, retry shortly
-    scheduleNextTraffic(800);
+    scheduleNextTraffic(400);
     return;
   }
 
@@ -1078,7 +1078,7 @@ async function executeAutoTrafficTick() {
 
   // Schedule next execution using Gaussian / Normal distribution
   if (trafficState.isRunning) {
-    const nextDelay = sampleNormalInterval(5000, 1200);
+    const nextDelay = sampleNormalInterval(1000, 250);
     scheduleNextTraffic(nextDelay);
   }
 }
@@ -1219,8 +1219,8 @@ async function animateQueryPackets(res, isClientQuery = false) {
   // 1. If User Client query, animate request packet from Client marker to Coordinator!
   if (isClientQuery) {
     const clientPos = getClientCoords();
-    createPacketAnimation(clientPos, coordNode, '#fbbf24', 300);
-    await sleep(320);
+    createPacketAnimation(clientPos, coordNode, '#fbbf24', 200);
+    await sleep(210);
   }
 
   // 2. Dispatch flights from coordinator to replica nodes
@@ -1246,9 +1246,9 @@ async function animateQueryPackets(res, isClientQuery = false) {
     const dispatchColor = isClientQuery ? '#38bdf8' : '#818cf8';
     dispatchPackets.forEach(p => {
       const col = p.severed ? '#ef4444' : dispatchColor;
-      createPacketAnimation(p.from, p.to, col, p.severed ? 280 : 400);
+      createPacketAnimation(p.from, p.to, col, p.severed ? 150 : 200);
     });
-    await sleep(420);
+    await sleep(210);
   }
 
   // 3. Response flights from responding nodes back to coordinator
@@ -1264,16 +1264,16 @@ async function animateQueryPackets(res, isClientQuery = false) {
 
   if (responsePackets.length > 0) {
     responsePackets.forEach(p => {
-      createPacketAnimation(p.from, p.to, '#34d399', 400);
+      createPacketAnimation(p.from, p.to, '#34d399', 200);
     });
-    await sleep(420);
+    await sleep(210);
   }
 
   // 4. If User Client query, animate ack response packet from Coordinator back to Client!
   if (isClientQuery) {
     const clientPos = getClientCoords();
-    createPacketAnimation(coordNode, clientPos, '#fbbf24', 300);
-    await sleep(320);
+    createPacketAnimation(coordNode, clientPos, '#fbbf24', 200);
+    await sleep(210);
   }
 
   elements.packetsLayer.innerHTML = '';

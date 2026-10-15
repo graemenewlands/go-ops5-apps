@@ -206,7 +206,7 @@ flowchart TD
 5. **Dual-Datacenter Automated Traffic Generator**:
    - Simulates real-world background Cassandra cluster traffic by alternating queries across DC1 (East) and DC2 (West).
    - Randomly issues `READ` and `WRITE` queries across all Consistency Levels (`ONE`, `TWO`, `THREE`, `LOCAL_QUORUM`, `QUORUM`).
-   - Query arrival rate is governed by a **normal (Gaussian) distribution** ($\mu = 5.0\text{s}, \sigma = 1.2\text{s}$) generated via the Box-Muller transform.
+   - Query arrival rate is governed by a **normal (Gaussian) distribution** ($\mu = 1.0\text{s}, \sigma = 0.25\text{s}$) generated via the Box-Muller transform with accelerated packet flight animations.
    - Dynamic visual feedback displays countdown timers, active coordinators, animated packet flights, and terminal audit logs.
 
 #### Launch Local Server:
