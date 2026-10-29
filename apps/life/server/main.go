@@ -15,8 +15,9 @@ func main() {
 	webDir := flag.String("dir", "apps/life/web", "Directory containing static web files")
 	flag.Parse()
 
-	// Ensure .wasm MIME type is explicitly mapped for WebAssembly streaming compilation
+	// Ensure .wasm and .webmanifest MIME types are explicitly mapped
 	_ = mime.AddExtensionType(".wasm", "application/wasm")
+	_ = mime.AddExtensionType(".webmanifest", "application/manifest+json")
 
 	absDir, err := filepath.Abs(*webDir)
 	if err != nil {

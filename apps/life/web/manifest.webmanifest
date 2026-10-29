@@ -1,0 +1,25 @@
+{
+  "name": "Conway's Game of Life — OPS5",
+  "short_name": "OPS5 Life",
+  "description": "Declarative cellular automaton powered by the pure Go OPS5 Rete Pattern Matching Engine in WebAssembly",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "theme_color": "#0a0d14",
+  "background_color": "#0a0d14",
+  "icons": [
+    {
+      "src": "icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

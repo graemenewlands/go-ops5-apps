@@ -470,6 +470,53 @@
     window.addEventListener('resize', () => {
       resizeCanvas();
     });
+
+    // ----------------------------------------------------------------------------
+    // Progressive Web App (PWA) & Service Worker
+    // ----------------------------------------------------------------------------
+    let deferredInstallPrompt = null;
+    const btnInstall = document.getElementById('btn-install');
+
+    window.addEventListener('beforeinstallprompt', (e) => {
+      e.preventDefault();
+      deferredInstallPrompt = e;
+      if (btnInstall) {
+        btnInstall.classList.remove('hidden');
+      }
+    });
+
+    if (btnInstall) {
+      btnInstall.addEventListener('click', async () => {
+        if (!deferredInstallPrompt) return;
+        deferredInstallPrompt.prompt();
+        const choiceResult = await deferredInstallPrompt.userChoice;
+        if (choiceResult && choiceResult.outcome === 'accepted') {
+          console.log('User accepted the PWA install prompt');
+        }
+        deferredInstallPrompt = null;
+        btnInstall.classList.add('hidden');
+      });
+    }
+
+    window.addEventListener('appinstalled', () => {
+      console.log('OPS5 Life PWA installed successfully');
+      if (btnInstall) {
+        btnInstall.classList.add('hidden');
+      }
+      deferredInstallPrompt = null;
+    });
+
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('sw.js', { scope: './' })
+          .then((reg) => {
+            console.log('OPS5 Life ServiceWorker registered with scope:', reg.scope);
+          })
+          .catch((err) => {
+            console.warn('OPS5 Life ServiceWorker registration failed:', err);
+          });
+      });
+    }
   }
 
   // Bootstrap
